@@ -1,0 +1,100 @@
+name: Booking smoke test
+
+on:
+  schedule:
+    - cron: '0 16 30 9 *'
+      timezone: "Europe/Warsaw"
+
+  workflow_dispatch:
+    inputs:
+      target_date:
+        description: "Target date (YYYY-MM-DD)"
+        required: true
+        default: "2026-10-04"
+        type: string
+      dry_run:
+        description: "Validate only; do NOT submit final acceptance"
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: booking-bot
+  cancel-in-progress: false
+
+jobs:
+  reserve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+
+    env:
+      BOOKING_BASE_URL: ${{ secrets.BOOKING_BASE_URL }}
+      BOOKING_LOGIN: ${{ secrets.BOOKING_LOGIN }}
+      BOOKING_PASSWORD: ${{ secrets.BOOKING_PASSWORD }}
+      BOOKING_CLUB_PATH: ${{ secrets.BOOKING_CLUB_PATH }}
+      BOOKING_LOGIN_PATH: ${{ secrets.BOOKING_LOGIN_PATH }}
+      BOOKING_VERIFY_PATH: ${{ secrets.BOOKING_VERIFY_PATH }}
+      BOOKING_OBJECT_ID: ${{ secrets.BOOKING_OBJECT_ID }}
+      BOOKING_DISCIPLINE: ${{ secrets.BOOKING_DISCIPLINE }}
+
+      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-04' }}
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+
+      BOOKING_MIN_START: "18:00"
+      BOOKING_PREFERRED_START: "19:30"
+      BOOKING_SECONDARY_START: "18:00"
+      BOOKING_LATEST_END: "21:30"
+      BOOKING_PREFERRED_DURATION_MIN: "90"
+      BOOKING_MIN_DURATION_MIN: "60"
+      BOOKING_MAX_PRICE: "0.00"
+
+    steps:
+      - name: One-time schedule guard
+        id: gate
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            if [[ "$(TZ=Europe/Warsaw date +%F)" == "2026-09-30" ]]; then
+              echo "run=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "run=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/checkout@v5
+
+      - name: Set up Java 21
+        if: steps.gate.outputs.run == 'true'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Validate secret configuration
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          set +x
+          for name in             BOOKING_BASE_URL BOOKING_LOGIN BOOKING_PASSWORD BOOKING_CLUB_PATH             BOOKING_OBJECT_ID BOOKING_DISCIPLINE
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "Missing required Actions secret: $name" >&2
+              exit 2
+            fi
+          done
+
+      - name: Build
+        if: steps.gate.outputs.run == 'true'
+        run: mvn --batch-mode --no-transfer-progress -DskipTests package
+
+      - name: Run booking client
+        if: steps.gate.outputs.run == 'true'
+        run: java -jar target/booking-bot-1.0.0.jar
