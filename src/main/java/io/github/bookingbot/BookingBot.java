@@ -15,9 +15,23 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.time.*;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.StringJoiner;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -76,6 +90,7 @@ public final class BookingBot {
                 log("SLOT start=" + slot.start.toLocalTime() + " rejected=" + e.code);
             }
         }
+
         throw new BotException("NO_RESERVATION_CREATED", 30);
     }
 
@@ -197,12 +212,11 @@ public final class BookingBot {
 
         boolean successMessage = result.text().contains("Właśnie dokonałeś rezerwacji");
         boolean reservationLink = !result.select("a[href*=/uslugi/rezerwacje/]").isEmpty();
-        boolean success = successMessage || reservationLink;
+        log("BOOKING finalResult successMessage=" + successMessage + " reservationLink=" + reservationLink);
 
-        log("BOOKING finalResult successMessage=" + successMessage
-                + " reservationLink=" + reservationLink);
-
-        if (!success) throw new BotException("FINAL_SUCCESS_NOT_CONFIRMED", 25);
+        if (!successMessage && !reservationLink) {
+            throw new BotException("FINAL_SUCCESS_NOT_CONFIRMED", 25);
+        }
 
         log("SUCCESS start=" + slot.start.toLocalTime() + " durationMin=" + duration.minutes);
         return true;
@@ -239,16 +253,17 @@ public final class BookingBot {
         int preferred = cfg.preferredStart.toSecondOfDay() / 60;
         int secondary = cfg.secondaryStart.toSecondOfDay() / 60;
         if (x == preferred) return 0;
-        if (x == secondary) return 1000;
-        return 2000 + Math.abs(x - preferred);
+        if (x == secondary) return 1_000;
+        return 2_000 + Math.abs(x - preferred);
     }
 
     private DurationChoice chooseDuration(Element form, LocalTime start) {
         Element select = form.selectFirst("select[name=ile_czasu]");
         if (select == null) {
-            return !start.plusMinutes(cfg.preferredDurationMinutes).isAfter(cfg.latestEnd)
-                    ? new DurationChoice("3", cfg.preferredDurationMinutes)
-                    : null;
+            if (!start.plusMinutes(cfg.preferredDurationMinutes).isAfter(cfg.latestEnd)) {
+                return new DurationChoice("3", cfg.preferredDurationMinutes);
+            }
+            return null;
         }
 
         List<DurationChoice> choices = new ArrayList<>();
@@ -285,7 +300,6 @@ public final class BookingBot {
             if (n > 0 && n <= 12) return n * 30;
         } catch (NumberFormatException ignored) {
         }
-
         return null;
     }
 
@@ -324,7 +338,6 @@ public final class BookingBot {
             if (selected == null) selected = select.selectFirst("option[value]");
             if (selected != null) out.put(select.attr("name"), selected.attr("value"));
         }
-
         return out;
     }
 
@@ -334,7 +347,6 @@ public final class BookingBot {
                 Pattern.compile("(?iu)(?:cena|do zapłaty|do zaplaty|price)\\s*[:\\-]?\\s*(\\d+[,.]\\d{2})\\s*(?:PLN|zł|zl)?"),
                 Pattern.compile("(?iu)(\\d+[,.]\\d{2})\\s*(?:PLN|zł|zl)")
         };
-
         for (Pattern p : patterns) {
             Matcher m = p.matcher(text);
             if (m.find()) return new BigDecimal(m.group(1).replace(',', '.'));
@@ -355,7 +367,6 @@ public final class BookingBot {
 
     private boolean isAuthenticated(Document doc) {
         if (!doc.select("a[href*=wyloguj]").isEmpty()) return true;
-
         String t = doc.text().toLowerCase(Locale.ROOT);
         return !t.contains("aby zarezerwować należy się")
                 && !t.contains("aby zarezerwowac nalezy sie")
@@ -375,8 +386,7 @@ public final class BookingBot {
 
     private Document getDocument(URI uri, String stage) throws Exception {
         HttpRequest req = baseRequest(uri).GET().build();
-        HttpResponse<String> r = send(req, stage, "GET");
-        return parse(r.body());
+        return parse(send(req, stage, "GET").body());
     }
 
     private HttpResponse<String> postForm(URI uri, Map<String, String> data, URI referer, String stage) throws Exception {
@@ -404,7 +414,7 @@ public final class BookingBot {
                 .header("Sec-Fetch-User", "?1");
     }
 
-    private HttpResponse<String> send(HttpRequest req, String stage, String method) throws Exception {
+    private HttpResponse<String> send(HttpRequest req, String stage, String method) {
         long started = System.nanoTime();
         log("HTTP stage=" + stage + " method=" + method + " event=request");
 
@@ -412,39 +422,29 @@ public final class BookingBot {
         try {
             r = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (IOException e) {
-            long ms = elapsedMs(started);
             log("HTTP stage=" + stage + " method=" + method
-                    + " event=io_error elapsedMs=" + ms
+                    + " event=io_error elapsedMs=" + elapsedMs(started)
                     + " exception=" + e.getClass().getSimpleName());
             throw new BotException(stage + "_IO_ERROR", 40);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            long ms = elapsedMs(started);
             log("HTTP stage=" + stage + " method=" + method
-                    + " event=interrupted elapsedMs=" + ms);
+                    + " event=interrupted elapsedMs=" + elapsedMs(started));
             throw new BotException(stage + "_INTERRUPTED", 40);
         }
 
-        long ms = elapsedMs(started);
-        traceResponse(stage, method, r, ms);
+        traceResponse(stage, method, r, elapsedMs(started));
         failOnChallenge(stage, r);
 
         if (r.statusCode() < 200 || r.statusCode() >= 400) {
             throw new BotException(stage + "_HTTP_" + r.statusCode(), 40);
         }
-
         return r;
     }
 
     private void traceResponse(String stage, String method, HttpResponse<String> r, long elapsedMs) {
-        String server = header(r, "server");
-        String cfRay = header(r, "cf-ray");
-        String cfMitigated = header(r, "cf-mitigated");
-        String cfCache = header(r, "cf-cache-status");
-        String contentType = header(r, "content-type");
-        int redirects = redirectCount(r);
         String body = r.body() == null ? "" : r.body();
-        int setCookieCount = r.headers().allValues("set-cookie").size();
+        ChallengeSignals signals = challengeSignals(r);
 
         log("HTTP stage=" + stage
                 + " method=" + method
@@ -452,54 +452,80 @@ public final class BookingBot {
                 + " status=" + r.statusCode()
                 + " elapsedMs=" + elapsedMs
                 + " version=" + r.version()
-                + " redirects=" + redirects
+                + " redirects=" + redirectCount(r)
                 + " bodyBytes=" + body.getBytes(StandardCharsets.UTF_8).length
                 + " bodySha256=" + sha256Prefix(body)
-                + " contentType=" + safeToken(contentType)
-                + " server=" + safeToken(server)
-                + " cfRay=" + safeToken(cfRay)
-                + " cfMitigated=" + safeToken(cfMitigated)
-                + " cfCacheStatus=" + safeToken(cfCache)
-                + " setCookieCount=" + setCookieCount
+                + " contentType=" + safeToken(header(r, "content-type"))
+                + " server=" + safeToken(header(r, "server"))
+                + " cfRay=" + safeToken(header(r, "cf-ray"))
+                + " cfMitigated=" + safeToken(header(r, "cf-mitigated"))
+                + " cfCacheStatus=" + safeToken(header(r, "cf-cache-status"))
+                + " challengeSignals=" + signals.summary()
+                + " setCookieCount=" + r.headers().allValues("set-cookie").size()
                 + " cookieJarCount=" + cookieCount());
     }
 
     private void failOnChallenge(String stage, HttpResponse<String> r) {
-        String body = r.body() == null ? "" : r.body();
-        String low = body.toLowerCase(Locale.ROOT);
+        ChallengeSignals signals = challengeSignals(r);
+        boolean challengeStatus = r.statusCode() == 403 || r.statusCode() == 429 || r.statusCode() == 503;
 
-        boolean bodyMarker = low.contains("cf-chl-")
-                || low.contains("challenge-platform")
-                || low.contains("just a moment")
-                || low.contains("attention required! | cloudflare")
-                || low.contains("enable javascript and cookies to continue");
+        boolean confirmedChallenge = signals.cfMitigatedChallenge
+                || signals.fatalBodyMarker
+                || (challengeStatus && signals.cloudflareEvidence);
 
-        boolean cfHeader = header(r, "server").toLowerCase(Locale.ROOT).contains("cloudflare")
-                || !header(r, "cf-ray").equals("-")
-                || !header(r, "cf-mitigated").equals("-");
-
-        boolean challengeStatus = r.statusCode() == 403
-                || r.statusCode() == 429
-                || r.statusCode() == 503;
-
-        boolean challenge = bodyMarker || (cfHeader && challengeStatus);
-
-        if (challenge) {
+        if (confirmedChallenge) {
             log("SECURITY stage=" + stage
                     + " cloudflareChallenge=true"
                     + " status=" + r.statusCode()
-                    + " cfHeader=" + cfHeader
-                    + " bodyMarker=" + bodyMarker
+                    + " signals=" + signals.summary()
                     + " action=stop");
             throw new BotException("CLOUDFLARE_CHALLENGE_" + stage + "_" + r.statusCode(), 50);
+        }
+
+        if (signals.genericChallengeResource) {
+            log("SECURITY stage=" + stage
+                    + " genericCloudflareResource=true"
+                    + " status=" + r.statusCode()
+                    + " action=continue");
         }
 
         if (challengeStatus) {
             log("HTTP stage=" + stage
                     + " elevatedStatus=true"
-                    + " cloudflareEvidence=false"
+                    + " cloudflareChallenge=false"
                     + " status=" + r.statusCode());
         }
+    }
+
+    private ChallengeSignals challengeSignals(HttpResponse<String> r) {
+        String low = (r.body() == null ? "" : r.body()).toLowerCase(Locale.ROOT);
+        String mitigated = header(r, "cf-mitigated").toLowerCase(Locale.ROOT);
+
+        boolean cfMitigatedChallenge = mitigated.contains("challenge");
+        boolean titleJustAMoment = low.contains("<title>just a moment") || low.contains(">just a moment...</title>");
+        boolean attentionRequired = low.contains("attention required! | cloudflare");
+        boolean enableJsCookies = low.contains("enable javascript and cookies to continue");
+        boolean cfChl = low.contains("cf-chl-");
+        boolean genericChallengeResource = low.contains("/cdn-cgi/challenge-platform/")
+                || low.contains("challenge-platform");
+
+        boolean fatalBodyMarker = titleJustAMoment || attentionRequired || enableJsCookies || cfChl;
+
+        boolean cloudflareEvidence = cfMitigatedChallenge
+                || !"-".equals(header(r, "cf-ray"))
+                || header(r, "server").toLowerCase(Locale.ROOT).contains("cloudflare")
+                || genericChallengeResource;
+
+        return new ChallengeSignals(
+                cfMitigatedChallenge,
+                fatalBodyMarker,
+                genericChallengeResource,
+                cloudflareEvidence,
+                titleJustAMoment,
+                attentionRequired,
+                enableJsCookies,
+                cfChl
+        );
     }
 
     private static String header(HttpResponse<?> r, String name) {
@@ -610,12 +636,34 @@ public final class BookingBot {
     }
 
     private void log(String msg) {
-        System.out.println("[" + ZonedDateTime.now(ZONE).format(LOG_TIME) + "]"
-                + " trace=" + traceId + " " + msg);
+        System.out.println("[" + ZonedDateTime.now(ZONE).format(LOG_TIME) + "] trace=" + traceId + " " + msg);
     }
 
     private record Slot(ZonedDateTime start, URI uri) {}
     private record DurationChoice(String value, int minutes) {}
+
+    private record ChallengeSignals(
+            boolean cfMitigatedChallenge,
+            boolean fatalBodyMarker,
+            boolean genericChallengeResource,
+            boolean cloudflareEvidence,
+            boolean titleJustAMoment,
+            boolean attentionRequired,
+            boolean enableJsCookies,
+            boolean cfChl
+    ) {
+        String summary() {
+            List<String> parts = new ArrayList<>();
+            if (cfMitigatedChallenge) parts.add("cf_mitigated");
+            if (titleJustAMoment) parts.add("title_just_a_moment");
+            if (attentionRequired) parts.add("attention_required");
+            if (enableJsCookies) parts.add("enable_js_cookies");
+            if (cfChl) parts.add("cf_chl");
+            if (genericChallengeResource) parts.add("challenge_resource");
+            if (parts.isEmpty() && cloudflareEvidence) parts.add("cf_edge_only");
+            return parts.isEmpty() ? "none" : String.join(",", parts);
+        }
+    }
 
     private static final class BotException extends RuntimeException {
         final String code;
@@ -650,11 +698,27 @@ public final class BookingBot {
         final String userAgent;
         final String acceptLanguage;
 
-        private Config(URI baseUri, String login, String password, String clubPath, String loginPath,
-                       String verifyPath, String objectId, String discipline, LocalDate targetDate,
-                       LocalTime minStart, LocalTime preferredStart, LocalTime secondaryStart,
-                       LocalTime latestEnd, int preferredDurationMinutes, int minDurationMinutes,
-                       BigDecimal maxPrice, boolean dryRun, String userAgent, String acceptLanguage) {
+        private Config(
+                URI baseUri,
+                String login,
+                String password,
+                String clubPath,
+                String loginPath,
+                String verifyPath,
+                String objectId,
+                String discipline,
+                LocalDate targetDate,
+                LocalTime minStart,
+                LocalTime preferredStart,
+                LocalTime secondaryStart,
+                LocalTime latestEnd,
+                int preferredDurationMinutes,
+                int minDurationMinutes,
+                BigDecimal maxPrice,
+                boolean dryRun,
+                String userAgent,
+                String acceptLanguage
+        ) {
             this.baseUri = baseUri;
             this.origin = baseUri.getScheme() + "://" + baseUri.getAuthority();
             this.login = login;
@@ -685,7 +749,7 @@ public final class BookingBot {
 
             String club = required("BOOKING_CLUB_PATH");
             String loginPath = optional("BOOKING_LOGIN_PATH", normalizePath(club) + "/logowanie");
-            String verifyPath = optional("BOOKING_VERIFY_PATH", normalizePath(club) + "/profil");
+            String verifyPath = optional("BOOKING_VERIFY_PATH", normalizePath(club));
 
             return new Config(
                     base,
@@ -705,8 +769,7 @@ public final class BookingBot {
                     Integer.parseInt(optional("BOOKING_MIN_DURATION_MIN", "60")),
                     new BigDecimal(optional("BOOKING_MAX_PRICE", "0.00")),
                     Boolean.parseBoolean(optional("BOOKING_DRY_RUN", "false")),
-                    optional("BOOKING_USER_AGENT",
-                            "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"),
+                    optional("BOOKING_USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"),
                     optional("BOOKING_ACCEPT_LANGUAGE", "en-US,en;q=0.9")
             );
         }
