@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+  schedule:
+    - cron: '54 23 * * *'
+      timezone: "Europe/Warsaw"
+
   workflow_dispatch:
     inputs:
       target_date:
@@ -28,7 +32,7 @@ concurrency:
 jobs:
   reserve:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 15
 
     env:
       BOOKING_BASE_URL: ${{ secrets.BOOKING_BASE_URL }}
@@ -48,8 +52,8 @@ jobs:
       # Required only for a deliberately requested live run.
       BOOKING_LIVE_GUARD: ${{ secrets.BOOKING_LIVE_GUARD }}
 
-      # Pushes are always safe dry-runs against the current diagnostic target.
-      # Manual runs can override both values through workflow_dispatch inputs.
+      # Pushes and schedule runs are safe dry-runs. Scheduled runs compute the
+      # opening target date in Java and use server-driven polling.
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
       BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
 
