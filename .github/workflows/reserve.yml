@@ -44,16 +44,12 @@ jobs:
       BOOKING_OBJECT_ID: ${{ secrets.BOOKING_OBJECT_ID }}
       BOOKING_DISCIPLINE: ${{ secrets.BOOKING_DISCIPLINE }}
 
-      # Optional fallback facility. Values remain only in Actions Secrets.
       BOOKING_FALLBACK_CLUB_PATH: ${{ secrets.BOOKING_FALLBACK_CLUB_PATH }}
       BOOKING_FALLBACK_OBJECT_ID: ${{ secrets.BOOKING_FALLBACK_OBJECT_ID }}
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
-      # Required only for a deliberately requested live run.
       BOOKING_LIVE_GUARD: ${{ secrets.BOOKING_LIVE_GUARD }}
 
-      # Pushes and schedule runs are safe dry-runs. Scheduled runs compute the
-      # opening target date in Java and use server-driven polling.
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
       BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
 
@@ -100,8 +96,8 @@ jobs:
             exit 3
           fi
 
-      - name: Apply verified HTTP flow patch
-        run: python3 .github/scripts/patch_login.py
+      - name: Apply verified HTTP flow patches
+        run: python3 .github/scripts/patch_all.py
 
       - name: Build
         run: mvn --batch-mode --no-transfer-progress -DskipTests package
