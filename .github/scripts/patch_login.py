@@ -144,8 +144,7 @@ price_new = '''        BigDecimal price = extractExplicitPrice(confirmation);
         if (price == null) {
             String confirmationText = confirmation.text().toLowerCase(Locale.ROOT);
             boolean priceWord = confirmationText.contains("cena") || confirmationText.contains("price");
-            boolean moneyToken = Pattern.compile("(?iu)\\d+[,.]\\d{2}\\s*(?:PLN|zł|zl)")
-                    .matcher(confirmation.text()).find();
+            boolean moneyToken = confirmationText.contains("pln") || confirmationText.contains("zł");
             log("BOOKING validationResult=noPrice"
                     + " reservationFormPresent=" + (findReservationForm(confirmation) != null)
                     + " priceWord=" + priceWord
