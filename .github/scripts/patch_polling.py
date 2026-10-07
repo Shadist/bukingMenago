@@ -127,7 +127,7 @@ polling_helpers = '''    private void runPolling() throws Exception {
                 || html.contains("data_grafiku%3d" + target);
 
         Pattern p = Pattern.compile("/grafik/(?:rezerwuj-standard|rezerwuj)/"
-                + Pattern.quote(facility.objectId) + "/(\\d+)");
+                + Pattern.quote(facility.objectId) + "/([0-9]+)");
         Matcher m = p.matcher(html);
         java.util.Set<Long> epochs = new java.util.HashSet<>();
         while (m.find()) {
