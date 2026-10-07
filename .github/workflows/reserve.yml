@@ -1,6 +1,10 @@
 name: Booking smoke test
 
 on:
+  push:
+    branches:
+      - main
+
   workflow_dispatch:
     inputs:
       target_date:
@@ -35,8 +39,12 @@ jobs:
       BOOKING_VERIFY_PATH: ${{ secrets.BOOKING_VERIFY_PATH }}
       BOOKING_OBJECT_ID: ${{ secrets.BOOKING_OBJECT_ID }}
       BOOKING_DISCIPLINE: ${{ secrets.BOOKING_DISCIPLINE }}
-      BOOKING_TARGET_DATE: ${{ inputs.target_date }}
-      BOOKING_DRY_RUN: ${{ inputs.dry_run }}
+
+      # Pushes are always safe dry-runs against the current diagnostic target.
+      # Manual runs can override both values through workflow_dispatch inputs.
+      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+
       BOOKING_MIN_START: "18:00"
       BOOKING_PREFERRED_START: "19:30"
       BOOKING_SECONDARY_START: "18:00"
