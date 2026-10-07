@@ -25,12 +25,11 @@ public final class BookingBot {
     private static final DateTimeFormatter LOG_TIME = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss z");
 
     private final Config cfg;
-    private final CookieManager cookies;
+    private final CookieManager cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
     private final HttpClient http;
 
     private BookingBot(Config cfg) {
         this.cfg = cfg;
-        this.cookies = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
         this.http = HttpClient.newBuilder()
                 .cookieHandler(cookies)
                 .connectTimeout(Duration.ofSeconds(15))
@@ -53,7 +52,6 @@ public final class BookingBot {
     private void run() throws Exception {
         log("Start. Target date=" + cfg.targetDate + ", dryRun=" + cfg.dryRun);
         loginFresh();
-
         Document schedule = getDocument(scheduleUri(), "SCHEDULE");
         ensureAuthenticated(schedule);
 
@@ -61,44 +59,37 @@ public final class BookingBot {
         if (slots.isEmpty()) throw new BotException("NO_CANDIDATE_SLOTS", 20);
 
         log("Candidate slots: " + slots.stream().map(s -> s.start.toLocalTime().toString()).toList());
-
         for (Slot slot : slots) {
             try {
                 if (trySlot(slot)) return;
             } catch (BotException e) {
-                if (e.code.equals("SESSION_EXPIRED")) {
+                if ("SESSION_EXPIRED".equals(e.code)) {
                     log("Session expired; re-login.");
                     loginFresh();
                     if (trySlot(slot)) return;
-                } else if (e.code.startsWith("CLOUDFLARE_")) {
-                    throw e;
-                } else {
-                    log("Slot " + slot.start.toLocalTime() + " rejected: " + e.code);
                 }
+                if (e.code.startsWith("CLOUDFLARE_")) throw e;
+                log("Slot " + slot.start.toLocalTime() + " rejected: " + e.code);
             }
         }
-
         throw new BotException("NO_RESERVATION_CREATED", 30);
     }
 
     private void loginFresh() throws Exception {
         cookies.getCookieStore().removeAll();
-
         URI loginUri = resolve(cfg.loginPath);
         Document loginPage = getDocument(loginUri, "LOGIN_GET");
         Element form = findLoginForm(loginPage);
         if (form == null) throw new BotException("LOGIN_FORM_NOT_FOUND", 11);
 
-        Map<String,String> data = formFields(form);
-
+        Map<String, String> data = formFields(form);
         Element pass = form.selectFirst("input[type=password][name]");
         if (pass == null) throw new BotException("PASSWORD_FIELD_NOT_FOUND", 11);
 
         Element login = form.selectFirst("input[type=email][name]");
         if (login == null) {
             login = form.select("input[type=text][name]").stream()
-                    .filter(el -> !looksLikeSearch(el))
-                    .findFirst().orElse(null);
+                    .filter(el -> !looksLikeSearch(el)).findFirst().orElse(null);
         }
         if (login == null) throw new BotException("LOGIN_FIELD_NOT_FOUND", 11);
 
@@ -114,7 +105,6 @@ public final class BookingBot {
 
         URI action = formAction(loginUri, form);
         postForm(action, data, loginUri, "LOGIN_POST");
-
         Document check = getDocument(resolve(cfg.verifyPath), "LOGIN_VERIFY");
         if (!isAuthenticated(check)) throw new BotException("LOGIN_FAILED", 12);
         log("Fresh HTTP login successful.");
@@ -122,7 +112,6 @@ public final class BookingBot {
 
     private boolean trySlot(Slot slot) throws Exception {
         log("Trying slot " + slot.start.toLocalTime());
-
         Document first = getDocument(slot.uri, "SLOT_GET");
         ensureAuthenticated(first);
 
@@ -132,7 +121,7 @@ public final class BookingBot {
         DurationChoice duration = chooseDuration(form, slot.start.toLocalTime());
         if (duration == null) throw new BotException("NO_ACCEPTABLE_DURATION", 21);
 
-        Map<String,String> step2 = formFields(form);
+        Map<String, String> step2 = formFields(form);
         step2.put("ile_czasu", duration.value);
         acceptMandatoryConsents(first, form, step2);
         step2.put("nowa_rezerwacja_kroki", "2");
@@ -141,13 +130,11 @@ public final class BookingBot {
         HttpResponse<String> r2 = postForm(action, step2, slot.uri, "RESERVATION_VALIDATE");
         Document confirmation = parse(r2.body());
         ensureAuthenticated(confirmation);
-
         if (containsValidationError(confirmation)) throw new BotException("SERVER_VALIDATION_REJECTED", 22);
 
         BigDecimal price = extractExplicitPrice(confirmation);
         if (price == null) throw new BotException("PRICE_NOT_DETECTED", 23);
         log("Validated duration=" + duration.minutes + "min, price=" + price.toPlainString());
-
         if (price.compareTo(cfg.maxPrice) > 0) throw new BotException("PRICE_ABOVE_LIMIT", 23);
 
         if (cfg.dryRun) {
@@ -158,7 +145,7 @@ public final class BookingBot {
         Element confirmForm = findReservationForm(confirmation);
         if (confirmForm == null) throw new BotException("CONFIRMATION_FORM_NOT_FOUND", 24);
 
-        Map<String,String> step3 = formFields(confirmForm);
+        Map<String, String> step3 = formFields(confirmForm);
         step3.put("ile_czasu", duration.value);
         step3.putIfAbsent("id_opcji_ceny", "0");
         step3.putIfAbsent("kod_znizkowy_opcji", "");
@@ -176,25 +163,20 @@ public final class BookingBot {
 
         boolean success = result.text().contains("Właśnie dokonałeś rezerwacji")
                 || !result.select("a[href*=/uslugi/rezerwacje/]").isEmpty();
-
         if (!success) throw new BotException("FINAL_SUCCESS_NOT_CONFIRMED", 25);
 
-        log("SUCCESS: reservation created for " + slot.start.toLocalTime() +
-                ", duration=" + duration.minutes + "min.");
+        log("SUCCESS: reservation created for " + slot.start.toLocalTime() + ", duration=" + duration.minutes + "min.");
         return true;
     }
 
     private List<Slot> findCandidateSlots(Document schedule) {
-        Pattern p = Pattern.compile("/grafik/(?:rezerwuj-standard|rezerwuj)/"
-                + Pattern.quote(cfg.objectId) + "/(\\d+)");
-
-        Map<Long,Slot> unique = new LinkedHashMap<>();
+        Pattern p = Pattern.compile("/grafik/(?:rezerwuj-standard|rezerwuj)/" + Pattern.quote(cfg.objectId) + "/(\\d+)");
+        Map<Long, Slot> unique = new LinkedHashMap<>();
 
         for (Element el : schedule.select("[href]")) {
             Matcher m = p.matcher(el.attr("href"));
             if (m.find()) addCandidate(unique, Long.parseLong(m.group(1)), el.attr("href"));
         }
-
         Matcher raw = p.matcher(schedule.outerHtml());
         while (raw.find()) addCandidate(unique, Long.parseLong(raw.group(1)), raw.group(0));
 
@@ -203,7 +185,7 @@ public final class BookingBot {
         return slots;
     }
 
-    private void addCandidate(Map<Long,Slot> out, long epoch, String href) {
+    private void addCandidate(Map<Long, Slot> out, long epoch, String href) {
         ZonedDateTime start = Instant.ofEpochSecond(epoch).atZone(ZONE);
         if (!start.toLocalDate().equals(cfg.targetDate)) return;
         if (start.toLocalTime().isBefore(cfg.minStart)) return;
@@ -223,22 +205,18 @@ public final class BookingBot {
     private DurationChoice chooseDuration(Element form, LocalTime start) {
         Element select = form.selectFirst("select[name=ile_czasu]");
         if (select == null) {
-            if (!start.plusMinutes(cfg.preferredDurationMinutes).isAfter(cfg.latestEnd)) {
-                return new DurationChoice("3", cfg.preferredDurationMinutes);
-            }
-            return null;
+            return !start.plusMinutes(cfg.preferredDurationMinutes).isAfter(cfg.latestEnd)
+                    ? new DurationChoice("3", cfg.preferredDurationMinutes) : null;
         }
 
         List<DurationChoice> choices = new ArrayList<>();
         for (Element opt : select.select("option[value]")) {
             if (opt.hasAttr("disabled")) continue;
             String value = opt.attr("value").trim();
-            if (value.isEmpty() || value.equals("0")) continue;
-
+            if (value.isEmpty() || "0".equals(value)) continue;
             Integer minutes = durationMinutes(value, opt.text());
             if (minutes == null || minutes < cfg.minDurationMinutes) continue;
             if (start.plusMinutes(minutes).isAfter(cfg.latestEnd)) continue;
-
             choices.add(new DurationChoice(value, minutes));
         }
 
@@ -246,78 +224,61 @@ public final class BookingBot {
                 .comparingInt((DurationChoice d) -> d.minutes == cfg.preferredDurationMinutes ? 0 : 1)
                 .thenComparingInt(d -> Math.abs(d.minutes - cfg.preferredDurationMinutes))
                 .thenComparingInt(d -> -d.minutes));
-
         return choices.isEmpty() ? null : choices.get(0);
     }
 
     private Integer durationMinutes(String value, String text) {
         String s = text.toLowerCase(Locale.ROOT).replace(',', '.');
-
         Matcher h = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(?:h|godz)").matcher(s);
-        if (h.find()) return (int)Math.round(Double.parseDouble(h.group(1)) * 60.0);
-
+        if (h.find()) return (int) Math.round(Double.parseDouble(h.group(1)) * 60.0);
         Matcher min = Pattern.compile("(\\d+)\\s*min").matcher(s);
         if (min.find()) return Integer.parseInt(min.group(1));
-
         try {
             int n = Integer.parseInt(value);
             if (n > 0 && n <= 12) return n * 30;
         } catch (NumberFormatException ignored) {}
-
         return null;
     }
 
-    private void acceptMandatoryConsents(Document doc, Element form, Map<String,String> data) {
+    private void acceptMandatoryConsents(Document doc, Element form, Map<String, String> data) {
         for (Element cb : form.select("input[type=checkbox][name]")) {
             String hay = (cb.attr("name") + " " + labelText(doc, cb)).toLowerCase(Locale.ROOT);
-            if (cb.hasAttr("required")
-                    || hay.contains("regulamin")
-                    || hay.contains("privacy")
-                    || hay.contains("rodo")
-                    || hay.contains("dane osob")
-                    || hay.contains("przetwarz")) {
+            if (cb.hasAttr("required") || hay.contains("regulamin") || hay.contains("privacy")
+                    || hay.contains("rodo") || hay.contains("dane osob") || hay.contains("przetwarz")) {
                 data.put(cb.attr("name"), cb.hasAttr("value") ? cb.attr("value") : "1");
             }
         }
     }
 
-    private static Map<String,String> formFields(Element form) {
-        LinkedHashMap<String,String> out = new LinkedHashMap<>();
-
+    private static Map<String, String> formFields(Element form) {
+        LinkedHashMap<String, String> out = new LinkedHashMap<>();
         for (Element input : form.select("input[name]")) {
             if (input.hasAttr("disabled")) continue;
-
             String type = input.attr("type").toLowerCase(Locale.ROOT);
-            if (Set.of("submit","button","image","file","password").contains(type)) continue;
-            if (Set.of("checkbox","radio").contains(type) && !input.hasAttr("checked")) continue;
-
+            if (Set.of("submit", "button", "image", "file", "password").contains(type)) continue;
+            if (Set.of("checkbox", "radio").contains(type) && !input.hasAttr("checked")) continue;
             out.put(input.attr("name"), input.attr("value"));
         }
-
         for (Element area : form.select("textarea[name]")) {
             if (!area.hasAttr("disabled")) out.put(area.attr("name"), area.val());
         }
-
         for (Element select : form.select("select[name]")) {
             if (select.hasAttr("disabled")) continue;
             Element selected = select.selectFirst("option[selected]");
             if (selected == null) selected = select.selectFirst("option[value]");
             if (selected != null) out.put(select.attr("name"), selected.attr("value"));
         }
-
         return out;
     }
 
     private BigDecimal extractExplicitPrice(Document doc) {
-        String t = doc.text();
-
-        Pattern[] ps = new Pattern[] {
+        String text = doc.text();
+        Pattern[] patterns = {
                 Pattern.compile("(?iu)(?:cena|do zapłaty|do zaplaty|price)\\s*[:\\-]?\\s*(\\d+[,.]\\d{2})\\s*(?:PLN|zł|zl)?"),
                 Pattern.compile("(?iu)(\\d+[,.]\\d{2})\\s*(?:PLN|zł|zl)")
         };
-
-        for (Pattern p : ps) {
-            Matcher m = p.matcher(t);
+        for (Pattern p : patterns) {
+            Matcher m = p.matcher(text);
             if (m.find()) return new BigDecimal(m.group(1).replace(',', '.'));
         }
         return null;
@@ -325,18 +286,14 @@ public final class BookingBot {
 
     private boolean containsValidationError(Document doc) {
         String t = doc.text().toLowerCase(Locale.ROOT);
-        return t.contains("musisz zaakceptować")
-                || t.contains("musisz zaakceptowac")
-                || t.contains("termin jest już zajęty")
-                || t.contains("termin jest juz zajety")
-                || t.contains("brak wolnych")
-                || t.contains("nie można dokonać rezerwacji")
+        return t.contains("musisz zaakceptować") || t.contains("musisz zaakceptowac")
+                || t.contains("termin jest już zajęty") || t.contains("termin jest juz zajety")
+                || t.contains("brak wolnych") || t.contains("nie można dokonać rezerwacji")
                 || t.contains("nie mozna dokonac rezerwacji");
     }
 
     private boolean isAuthenticated(Document doc) {
         if (!doc.select("a[href*=wyloguj]").isEmpty()) return true;
-
         String t = doc.text().toLowerCase(Locale.ROOT);
         return !t.contains("aby zarezerwować należy się")
                 && !t.contains("aby zarezerwowac nalezy sie")
@@ -359,24 +316,20 @@ public final class BookingBot {
                 .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                 .header("Accept-Language", "pl,en;q=0.8")
                 .GET().build();
-
         HttpResponse<String> r;
         try {
             r = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new BotException(stage + "_IO_ERROR", 40);
         }
-
         failOnChallenge(r.body(), r.statusCode());
-
         if (r.statusCode() < 200 || r.statusCode() >= 400) {
             throw new BotException(stage + "_HTTP_" + r.statusCode(), 40);
         }
-
         return parse(r.body());
     }
 
-    private HttpResponse<String> postForm(URI uri, Map<String,String> data, URI referer, String stage) throws Exception {
+    private HttpResponse<String> postForm(URI uri, Map<String, String> data, URI referer, String stage) throws Exception {
         HttpRequest req = HttpRequest.newBuilder(uri)
                 .timeout(Duration.ofSeconds(25))
                 .header("User-Agent", cfg.userAgent)
@@ -387,29 +340,23 @@ public final class BookingBot {
                 .header("Referer", referer.toString())
                 .POST(HttpRequest.BodyPublishers.ofString(encodeForm(data), StandardCharsets.UTF_8))
                 .build();
-
         HttpResponse<String> r;
         try {
             r = http.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
         } catch (IOException e) {
             throw new BotException(stage + "_IO_ERROR", 40);
         }
-
         failOnChallenge(r.body(), r.statusCode());
-
         if (r.statusCode() < 200 || r.statusCode() >= 400) {
             throw new BotException(stage + "_HTTP_" + r.statusCode(), 40);
         }
-
         return r;
     }
 
     private void failOnChallenge(String body, int status) {
         String low = body == null ? "" : body.toLowerCase(Locale.ROOT);
-        if (status == 403 || status == 429 || status == 503
-                || low.contains("cf-chl-")
-                || low.contains("challenge-platform")
-                || low.contains("just a moment")
+        if (status == 403 || status == 429 || status == 503 || low.contains("cf-chl-")
+                || low.contains("challenge-platform") || low.contains("just a moment")
                 || low.contains("attention required! | cloudflare")) {
             throw new BotException("CLOUDFLARE_CHALLENGE", 50);
         }
@@ -441,9 +388,11 @@ public final class BookingBot {
     }
 
     private static String labelText(Document doc, Element input) {
-        if (!input.id().isBlank()) {
-            Element label = doc.selectFirst("label[for=\\"" + input.id().replace("\\"","") + "\\"]");
-            if (label != null) return label.text();
+        String id = input.id();
+        if (!id.isBlank()) {
+            for (Element label : doc.select("label[for]")) {
+                if (id.equals(label.attr("for"))) return label.text();
+            }
         }
         Element parent = input.closest("label");
         return parent == null ? "" : parent.text();
@@ -463,9 +412,9 @@ public final class BookingBot {
         return u.isAbsolute() ? u : base.resolve(u);
     }
 
-    private static String encodeForm(Map<String,String> data) {
+    private static String encodeForm(Map<String, String> data) {
         StringJoiner j = new StringJoiner("&");
-        data.forEach((k,v) -> j.add(enc(k) + "=" + enc(v == null ? "" : v)));
+        data.forEach((k, v) -> j.add(enc(k) + "=" + enc(v == null ? "" : v)));
         return j.toString();
     }
 
@@ -483,7 +432,6 @@ public final class BookingBot {
     private static final class BotException extends RuntimeException {
         final String code;
         final int exitCode;
-
         BotException(String code, int exitCode) {
             this.code = code;
             this.exitCode = exitCode;
@@ -511,11 +459,11 @@ public final class BookingBot {
         final boolean dryRun;
         final String userAgent;
 
-        private Config(URI baseUri, String login, String password, String clubPath,
-                       String loginPath, String verifyPath, String objectId, String discipline,
-                       LocalDate targetDate, LocalTime minStart, LocalTime preferredStart,
-                       LocalTime secondaryStart, LocalTime latestEnd, int preferredDurationMinutes,
-                       int minDurationMinutes, BigDecimal maxPrice, boolean dryRun, String userAgent) {
+        private Config(URI baseUri, String login, String password, String clubPath, String loginPath,
+                       String verifyPath, String objectId, String discipline, LocalDate targetDate,
+                       LocalTime minStart, LocalTime preferredStart, LocalTime secondaryStart,
+                       LocalTime latestEnd, int preferredDurationMinutes, int minDurationMinutes,
+                       BigDecimal maxPrice, boolean dryRun, String userAgent) {
             this.baseUri = baseUri;
             this.origin = baseUri.getScheme() + "://" + baseUri.getAuthority();
             this.login = login;
@@ -539,9 +487,7 @@ public final class BookingBot {
 
         static Config fromEnvironment() {
             URI base = URI.create(required("BOOKING_BASE_URL"));
-            if (base.getScheme() == null || base.getHost() == null) {
-                throw new BotException("INVALID_BASE_URL", 2);
-            }
+            if (base.getScheme() == null || base.getHost() == null) throw new BotException("INVALID_BASE_URL", 2);
 
             String club = required("BOOKING_CLUB_PATH");
             String loginPath = optional("BOOKING_LOGIN_PATH", normalizePath(club) + "/logowanie");
@@ -557,16 +503,15 @@ public final class BookingBot {
                     required("BOOKING_OBJECT_ID"),
                     required("BOOKING_DISCIPLINE"),
                     LocalDate.parse(required("BOOKING_TARGET_DATE")),
-                    LocalTime.parse(optional("BOOKING_MIN_START","18:00")),
-                    LocalTime.parse(optional("BOOKING_PREFERRED_START","19:30")),
-                    LocalTime.parse(optional("BOOKING_SECONDARY_START","18:00")),
-                    LocalTime.parse(optional("BOOKING_LATEST_END","21:30")),
-                    Integer.parseInt(optional("BOOKING_PREFERRED_DURATION_MIN","90")),
-                    Integer.parseInt(optional("BOOKING_MIN_DURATION_MIN","60")),
-                    new BigDecimal(optional("BOOKING_MAX_PRICE","0.00")),
-                    Boolean.parseBoolean(optional("BOOKING_DRY_RUN","false")),
-                    optional("BOOKING_USER_AGENT",
-                            "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0")
+                    LocalTime.parse(optional("BOOKING_MIN_START", "18:00")),
+                    LocalTime.parse(optional("BOOKING_PREFERRED_START", "19:30")),
+                    LocalTime.parse(optional("BOOKING_SECONDARY_START", "18:00")),
+                    LocalTime.parse(optional("BOOKING_LATEST_END", "21:30")),
+                    Integer.parseInt(optional("BOOKING_PREFERRED_DURATION_MIN", "90")),
+                    Integer.parseInt(optional("BOOKING_MIN_DURATION_MIN", "60")),
+                    new BigDecimal(optional("BOOKING_MAX_PRICE", "0.00")),
+                    Boolean.parseBoolean(optional("BOOKING_DRY_RUN", "false")),
+                    optional("BOOKING_USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0")
             );
         }
 
@@ -584,7 +529,7 @@ public final class BookingBot {
         private static String normalizePath(String p) {
             String x = p.trim();
             if (!x.startsWith("/")) x = "/" + x;
-            while (x.endsWith("/") && x.length() > 1) x = x.substring(0, x.length()-1);
+            while (x.endsWith("/") && x.length() > 1) x = x.substring(0, x.length() - 1);
             return x;
         }
     }
