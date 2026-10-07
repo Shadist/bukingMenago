@@ -207,3 +207,6 @@ src = replace_once(src, record_old, record_new, "facility record")
 
 path.write_text(src, encoding="utf-8")
 print("Fallback facility patch applied")
+
+polling_script = Path(".github/scripts/patch_polling.py")
+exec(compile(polling_script.read_text(encoding="utf-8"), str(polling_script), "exec"))
