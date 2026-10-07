@@ -193,3 +193,9 @@ src = replace_once(src, step3_old, step3_new, "final reservation")
 
 path.write_text(src, encoding="utf-8")
 print("Booking redirect/base-URI patch applied")
+
+# Chain the optional fallback patch. It is diagnostic-only after a successful
+# primary dry-run, and is never probed after primary success in live mode.
+__import__("os").environ.setdefault("BOOKING_PROBE_FALLBACK", "true")
+fallback_script = Path(".github/scripts/patch_fallback.py")
+exec(compile(fallback_script.read_text(encoding="utf-8"), str(fallback_script), "exec"))
