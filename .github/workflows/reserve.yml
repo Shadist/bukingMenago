@@ -21,6 +21,11 @@ on:
         required: true
         default: true
         type: boolean
+      confirm_live:
+        description: "For dry_run=false type exactly BOOK_NOW"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -48,10 +53,9 @@ jobs:
       BOOKING_FALLBACK_OBJECT_ID: ${{ secrets.BOOKING_FALLBACK_OBJECT_ID }}
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
-      BOOKING_LIVE_GUARD: ${{ secrets.BOOKING_LIVE_GUARD }}
-
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
       BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+      BOOKING_LIVE_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_live || '' }}
 
       BOOKING_MIN_START: "18:00"
       BOOKING_PREFERRED_START: "19:30"
@@ -91,10 +95,15 @@ jobs:
         shell: bash
         run: |
           set +x
-          if [[ "${BOOKING_LIVE_GUARD:-}" != "ALLOW_FINAL_ACCEPTANCE" ]]; then
-            echo "Live mode blocked: BOOKING_LIVE_GUARD is not enabled." >&2
+          if [[ "${GITHUB_EVENT_NAME}" != "workflow_dispatch" ]]; then
+            echo "Live mode is allowed only for a manual workflow_dispatch run." >&2
             exit 3
           fi
+          if [[ "${BOOKING_LIVE_CONFIRM:-}" != "BOOK_NOW" ]]; then
+            echo "Live mode blocked: confirm_live must be exactly BOOK_NOW." >&2
+            exit 3
+          fi
+          echo "Manual live confirmation accepted. Final acceptance may be submitted only after server validation and price=0.00."
 
       - name: Apply verified HTTP flow patches
         run: python3 .github/scripts/patch_all.py
