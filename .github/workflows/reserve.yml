@@ -1,10 +1,6 @@
 name: Booking smoke test
 
 on:
-  schedule:
-    - cron: '0 16 30 9 *'
-      timezone: "Europe/Warsaw"
-
   workflow_dispatch:
     inputs:
       target_date:
@@ -39,10 +35,8 @@ jobs:
       BOOKING_VERIFY_PATH: ${{ secrets.BOOKING_VERIFY_PATH }}
       BOOKING_OBJECT_ID: ${{ secrets.BOOKING_OBJECT_ID }}
       BOOKING_DISCIPLINE: ${{ secrets.BOOKING_DISCIPLINE }}
-
-      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
-      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
-
+      BOOKING_TARGET_DATE: ${{ inputs.target_date }}
+      BOOKING_DRY_RUN: ${{ inputs.dry_run }}
       BOOKING_MIN_START: "18:00"
       BOOKING_PREFERRED_START: "19:30"
       BOOKING_SECONDARY_START: "18:00"
@@ -52,26 +46,10 @@ jobs:
       BOOKING_MAX_PRICE: "0.00"
 
     steps:
-      - name: One-time schedule guard
-        id: gate
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            if [[ "$(TZ=Europe/Warsaw date +%F)" == "2026-09-30" ]]; then
-              echo "run=true" >> "$GITHUB_OUTPUT"
-            else
-              echo "run=false" >> "$GITHUB_OUTPUT"
-            fi
-          else
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout
-        if: steps.gate.outputs.run == 'true'
         uses: actions/checkout@v5
 
       - name: Set up Java 21
-        if: steps.gate.outputs.run == 'true'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
@@ -79,7 +57,6 @@ jobs:
           cache: maven
 
       - name: Validate secret configuration
-        if: steps.gate.outputs.run == 'true'
         shell: bash
         run: |
           set +x
@@ -93,86 +70,11 @@ jobs:
             fi
           done
 
-      - name: Patch login submission diagnostics
-        if: steps.gate.outputs.run == 'true'
-        shell: bash
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("src/main/java/io/github/bookingbot/BookingBot.java")
-          src = path.read_text(encoding="utf-8")
-
-          old = '''        log("AUTH loginForm=true loginField=" + safeFieldName(login.attr("name"))
-                  + " passwordField=" + safeFieldName(pass.attr("name"))
-                  + " formFieldCount=" + data.size()
-                  + " rememberFieldCount=" + rememberFields);
-
-          URI action = formAction(loginUri, form);
-          postForm(action, data, loginUri, "LOGIN_POST");
-
-          Document check = getDocument(resolve(cfg.verifyPath), "LOGIN_VERIFY");
-          boolean authenticated = isAuthenticated(check);
-          log("AUTH verify authenticated=" + authenticated + " cookieCount=" + cookieCount());
-          if (!authenticated) throw new BotException("LOGIN_FAILED", 12);
-          log("AUTH freshLogin=success");
-      }
-
-      private boolean trySlot(Slot slot) throws Exception {'''
-
-          new = '''        Element submit = chooseLoginSubmit(form);
-          String submitField = "-";
-          if (submit != null && submit.hasAttr("name") && !submit.attr("name").isBlank()) {
-              submitField = safeFieldName(submit.attr("name"));
-              data.put(submit.attr("name"), submit.hasAttr("value") ? submit.attr("value") : submit.text());
-          }
-
-          log("AUTH loginForm=true loginField=" + safeFieldName(login.attr("name"))
-                  + " passwordField=" + safeFieldName(pass.attr("name"))
-                  + " submitField=" + submitField
-                  + " formFieldCount=" + data.size()
-                  + " rememberFieldCount=" + rememberFields);
-
-          URI action = formAction(loginUri, form);
-          HttpResponse<String> loginResponse = postForm(action, data, loginUri, "LOGIN_POST");
-          Document afterPost = parse(loginResponse.body());
-          boolean loginFormStillPresent = findLoginForm(afterPost) != null;
-          boolean logoutLink = !afterPost.select("a[href*=wyloguj]").isEmpty();
-          log("AUTH postResult loginFormStillPresent=" + loginFormStillPresent
-                  + " logoutLink=" + logoutLink
-                  + " cookieCount=" + cookieCount());
-
-          if (loginFormStillPresent && !logoutLink) {
-              throw new BotException("LOGIN_FAILED_FORM_STILL_PRESENT", 12);
-          }
-          log("AUTH freshLogin=accepted_by_post");
-      }
-
-      private static Element chooseLoginSubmit(Element form) {
-          for (Element el : form.select("input[type=submit],button[type=submit],button:not([type])")) {
-              String hay = (el.attr("name") + " " + el.attr("value") + " " + el.text()).toLowerCase(Locale.ROOT);
-              if (hay.contains("zalog") || hay.contains("login") || hay.contains("sign in") || hay.contains("signin")) {
-                  return el;
-              }
-          }
-          Element named = form.selectFirst("input[type=submit][name],button[type=submit][name],button:not([type])[name]");
-          if (named != null) return named;
-          return form.selectFirst("input[type=submit],button[type=submit],button:not([type])");
-      }
-
-      private boolean trySlot(Slot slot) throws Exception {'''
-
-          if old not in src:
-              raise SystemExit("Expected login block not found; refusing to patch unknown source")
-
-          path.write_text(src.replace(old, new, 1), encoding="utf-8")
-          print("Login diagnostic patch applied")
-          PY
+      - name: Apply login diagnostic patch
+        run: python3 .github/scripts/patch_login.py
 
       - name: Build
-        if: steps.gate.outputs.run == 'true'
         run: mvn --batch-mode --no-transfer-progress -DskipTests package
 
       - name: Run booking client
-        if: steps.gate.outputs.run == 'true'
         run: java -jar target/booking-bot-1.0.0.jar
