@@ -10,7 +10,7 @@ on:
       target_date:
         description: "Target date (YYYY-MM-DD)"
         required: true
-        default: "2026-10-04"
+        default: "2026-10-10"
         type: string
       dry_run:
         description: "Validate only; do NOT submit final acceptance"
@@ -40,7 +40,7 @@ jobs:
       BOOKING_OBJECT_ID: ${{ secrets.BOOKING_OBJECT_ID }}
       BOOKING_DISCIPLINE: ${{ secrets.BOOKING_DISCIPLINE }}
 
-      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-04' }}
+      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
       BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
 
       BOOKING_MIN_START: "18:00"
@@ -83,13 +83,91 @@ jobs:
         shell: bash
         run: |
           set +x
-          for name in             BOOKING_BASE_URL BOOKING_LOGIN BOOKING_PASSWORD BOOKING_CLUB_PATH             BOOKING_OBJECT_ID BOOKING_DISCIPLINE
+          for name in \
+            BOOKING_BASE_URL BOOKING_LOGIN BOOKING_PASSWORD BOOKING_CLUB_PATH \
+            BOOKING_OBJECT_ID BOOKING_DISCIPLINE
           do
             if [[ -z "${!name:-}" ]]; then
               echo "Missing required Actions secret: $name" >&2
               exit 2
             fi
           done
+
+      - name: Patch login submission diagnostics
+        if: steps.gate.outputs.run == 'true'
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/main/java/io/github/bookingbot/BookingBot.java")
+          src = path.read_text(encoding="utf-8")
+
+          old = '''        log("AUTH loginForm=true loginField=" + safeFieldName(login.attr("name"))
+                  + " passwordField=" + safeFieldName(pass.attr("name"))
+                  + " formFieldCount=" + data.size()
+                  + " rememberFieldCount=" + rememberFields);
+
+          URI action = formAction(loginUri, form);
+          postForm(action, data, loginUri, "LOGIN_POST");
+
+          Document check = getDocument(resolve(cfg.verifyPath), "LOGIN_VERIFY");
+          boolean authenticated = isAuthenticated(check);
+          log("AUTH verify authenticated=" + authenticated + " cookieCount=" + cookieCount());
+          if (!authenticated) throw new BotException("LOGIN_FAILED", 12);
+          log("AUTH freshLogin=success");
+      }
+
+      private boolean trySlot(Slot slot) throws Exception {'''
+
+          new = '''        Element submit = chooseLoginSubmit(form);
+          String submitField = "-";
+          if (submit != null && submit.hasAttr("name") && !submit.attr("name").isBlank()) {
+              submitField = safeFieldName(submit.attr("name"));
+              data.put(submit.attr("name"), submit.hasAttr("value") ? submit.attr("value") : submit.text());
+          }
+
+          log("AUTH loginForm=true loginField=" + safeFieldName(login.attr("name"))
+                  + " passwordField=" + safeFieldName(pass.attr("name"))
+                  + " submitField=" + submitField
+                  + " formFieldCount=" + data.size()
+                  + " rememberFieldCount=" + rememberFields);
+
+          URI action = formAction(loginUri, form);
+          HttpResponse<String> loginResponse = postForm(action, data, loginUri, "LOGIN_POST");
+          Document afterPost = parse(loginResponse.body());
+          boolean loginFormStillPresent = findLoginForm(afterPost) != null;
+          boolean logoutLink = !afterPost.select("a[href*=wyloguj]").isEmpty();
+          log("AUTH postResult loginFormStillPresent=" + loginFormStillPresent
+                  + " logoutLink=" + logoutLink
+                  + " cookieCount=" + cookieCount());
+
+          if (loginFormStillPresent && !logoutLink) {
+              throw new BotException("LOGIN_FAILED_FORM_STILL_PRESENT", 12);
+          }
+          log("AUTH freshLogin=accepted_by_post");
+      }
+
+      private static Element chooseLoginSubmit(Element form) {
+          for (Element el : form.select("input[type=submit],button[type=submit],button:not([type])")) {
+              String hay = (el.attr("name") + " " + el.attr("value") + " " + el.text()).toLowerCase(Locale.ROOT);
+              if (hay.contains("zalog") || hay.contains("login") || hay.contains("sign in") || hay.contains("signin")) {
+                  return el;
+              }
+          }
+          Element named = form.selectFirst("input[type=submit][name],button[type=submit][name],button:not([type])[name]");
+          if (named != null) return named;
+          return form.selectFirst("input[type=submit],button[type=submit],button:not([type])");
+      }
+
+      private boolean trySlot(Slot slot) throws Exception {'''
+
+          if old not in src:
+              raise SystemExit("Expected login block not found; refusing to patch unknown source")
+
+          path.write_text(src.replace(old, new, 1), encoding="utf-8")
+          print("Login diagnostic patch applied")
+          PY
 
       - name: Build
         if: steps.gate.outputs.run == 'true'
