@@ -50,7 +50,7 @@ run_new = '''    private void run() throws Exception {
 
         boolean primarySucceeded = attemptFacility(primary, false);
         if (primarySucceeded) {
-            if (cfg.dryRun && probeFallbackEnabled() && fallback != null) {
+            if (cfg.dryRun && fallback != null) {
                 log("FALLBACK probe=true action=diagnostic_only");
                 try {
                     attemptFacility(fallback, true);
@@ -121,10 +121,6 @@ run_new = '''    private void run() throws Exception {
         if (any && !all) throw new BotException("INCOMPLETE_FALLBACK_CONFIG", 2);
         if (!all) return null;
         return new Facility("FALLBACK", Config.normalizePath(club), objectId, discipline);
-    }
-
-    private boolean probeFallbackEnabled() {
-        return Boolean.parseBoolean(envTrim("BOOKING_PROBE_FALLBACK"));
     }
 
     private static String envTrim(String name) {
