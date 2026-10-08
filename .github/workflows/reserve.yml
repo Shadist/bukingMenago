@@ -9,7 +9,7 @@ on:
     - cron: '54 23 * * *'
       timezone: "Europe/Warsaw"
     - cron: '30 20 8 10 *'
-      timezone: "Europe/Warsaw
+      timezone: "Europe/Warsaw"
 
   workflow_dispatch:
     inputs:
@@ -56,10 +56,10 @@ jobs:
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
-      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && github.event.schedule == '0 20 8 10 *' && 'false' || 'true' }}
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && github.event.schedule == '30 20 8 10 *' && 'false' || 'true' }}
       BOOKING_LIVE_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_live || '' }}
       BOOKING_SCHEDULE_EXPR: ${{ github.event.schedule || '' }}
-      BOOKING_TARGET_OFFSET_DAYS: ${{ github.event_name == 'schedule' && github.event.schedule == '0 20 8 10 *' && '2' || '4' }}
+      BOOKING_TARGET_OFFSET_DAYS: ${{ github.event_name == 'schedule' && github.event.schedule == '30 20 8 10 *' && '2' || '4' }}
 
       BOOKING_MIN_START: "18:00"
       BOOKING_PREFERRED_START: "19:30"
