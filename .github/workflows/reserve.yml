@@ -6,9 +6,7 @@ on:
       - main
 
   schedule:
-    - cron: '54 23 * * *'
-      timezone: "Europe/Warsaw"
-    - cron: '35 20 8 10 *'
+    - cron: '40 23 * * *'
       timezone: "Europe/Warsaw"
 
   workflow_dispatch:
@@ -39,7 +37,7 @@ concurrency:
 jobs:
   reserve:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     env:
       BOOKING_BASE_URL: ${{ secrets.BOOKING_BASE_URL }}
@@ -56,10 +54,11 @@ jobs:
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
-      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && github.event.schedule == '35 20 8 10 *' && 'false' || 'true' }}
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && github.event.schedule == '40 23 * * *' && 'false' || 'true' }}
       BOOKING_LIVE_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_live || '' }}
       BOOKING_SCHEDULE_EXPR: ${{ github.event.schedule || '' }}
-      BOOKING_TARGET_OFFSET_DAYS: ${{ github.event_name == 'schedule' && github.event.schedule == '35 20 8 10 *' && '2' || '4' }}
+      BOOKING_TARGET_OFFSET_DAYS: "4"
+      BOOKING_POLL_INTERVAL_SECONDS: "5"
 
       BOOKING_MIN_START: "18:00"
       BOOKING_PREFERRED_START: "19:30"
@@ -99,32 +98,23 @@ jobs:
         shell: bash
         run: |
           set +x
-
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
             if [[ "${BOOKING_LIVE_CONFIRM:-}" != "BOOK_NOW" ]]; then
               echo "Live mode blocked: confirm_live must be exactly BOOK_NOW." >&2
               exit 3
             fi
-
           elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            if [[ "${BOOKING_SCHEDULE_EXPR:-}" != "35 20 8 10 *" ]]; then
-              echo "Live mode blocked for this schedule." >&2
+            if [[ "${BOOKING_SCHEDULE_EXPR:-}" != "40 23 * * *" ]]; then
+              echo "Live mode blocked for unexpected schedule." >&2
               exit 3
             fi
-
-            if [[ "$(TZ=Europe/Warsaw date +%F)" != "2026-10-08" ]]; then
-              echo "One-off live test expired." >&2
-              exit 3
-            fi
-
-            echo "Scheduled live test accepted."
-
+            echo "Scheduled live booking accepted."
           else
             echo "Live mode blocked for event: ${GITHUB_EVENT_NAME}" >&2
             exit 3
           fi
-
           echo "Final acceptance allowed only after validation and price=0.00."
+
       - name: Apply verified HTTP flow patches
         run: python3 .github/scripts/patch_all.py
 
