@@ -36,14 +36,13 @@ polling_helpers = '''    private void runPolling() throws Exception {
         Facility primary = new Facility("PRIMARY", cfg.clubPath, cfg.objectId, cfg.discipline);
         Facility fallback = configuredFallback();
         ZonedDateTime deadline = pollingDeadline();
-        int intervalSeconds = pollingIntervalSeconds();
         int pollCount = 0;
         boolean relogged = false;
         boolean opened = false;
 
         log("POLL start targetDate=" + cfg.targetDate
                 + " deadline=" + deadline.format(LOG_TIME)
-                + " intervalSeconds=" + intervalSeconds);
+                + " slowIntervalSeconds=180 fastFrom=23:54 fastIntervalSeconds=" + fastPollingIntervalSeconds());
 
         while (!ZonedDateTime.now(ZONE).isAfter(deadline)) {
             pollCount++;
@@ -71,7 +70,9 @@ polling_helpers = '''    private void runPolling() throws Exception {
                 throw e;
             }
 
-            sleepPolling(intervalSeconds);
+            int sleepSeconds = pollingIntervalSeconds();
+            log("POLL nextPollInSeconds=" + sleepSeconds);
+            sleepPolling(sleepSeconds);
         }
 
         if (!opened) {
@@ -105,6 +106,18 @@ polling_helpers = '''    private void runPolling() throws Exception {
     }
 
     private int pollingIntervalSeconds() {
+        LocalTime now = ZonedDateTime.now(ZONE).toLocalTime();
+        LocalTime fastFrom = LocalTime.of(23, 54);
+        LocalTime fastUntil = LocalTime.of(0, 5);
+
+        boolean fastWindow = !now.isBefore(fastFrom) || !now.isAfter(fastUntil);
+        if (fastWindow) return fastPollingIntervalSeconds();
+
+        long secondsUntilFast = Duration.between(now, fastFrom).getSeconds();
+        return (int) Math.max(1, Math.min(180, secondsUntilFast));
+    }
+
+    private int fastPollingIntervalSeconds() {
         String raw = envTrim("BOOKING_POLL_INTERVAL_SECONDS");
         int value = raw.isBlank() ? 5 : Integer.parseInt(raw);
         return Math.max(2, Math.min(60, value));
