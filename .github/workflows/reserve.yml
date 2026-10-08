@@ -54,7 +54,7 @@ jobs:
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
-      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'true' }}
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || 'true' }}
       BOOKING_LIVE_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_live || '' }}
 
       BOOKING_MIN_START: "18:00"
