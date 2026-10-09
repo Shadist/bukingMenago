@@ -52,12 +52,10 @@ jobs:
       BOOKING_FALLBACK_OBJECT_ID: ${{ secrets.BOOKING_FALLBACK_OBJECT_ID }}
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
-      # Runtime behaviour. The cron string is never referenced below.
       BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && 'false' || 'true' }}
       BOOKING_POLL_MODE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
       BOOKING_LIVE_AUTHORIZED: ${{ github.event_name == 'schedule' && 'true' || github.event_name == 'workflow_dispatch' && inputs.confirm_live == 'BOOK_NOW' && 'true' || 'false' }}
 
-      # Manual runs use an exact date. Scheduled runs use today + offset.
       BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
       BOOKING_TARGET_OFFSET_DAYS: "2"
       BOOKING_POLL_INTERVAL_SECONDS: "5"
@@ -108,6 +106,15 @@ jobs:
 
       - name: Apply verified HTTP flow patches
         run: python3 .github/scripts/patch_all.py
+
+      - name: Upload materialized Java
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: materialized-booking-java
+          path: src/main/java/io/github/bookingbot/BookingBot.java
+          if-no-files-found: error
+          retention-days: 1
 
       - name: Build
         run: mvn --batch-mode --no-transfer-progress -DskipTests package
