@@ -27,7 +27,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: booking-bot
@@ -103,21 +103,6 @@ jobs:
             exit 3
           fi
           echo "Live booking authorized. Final acceptance is still subject to server validation and price=0.00."
-
-      - name: Apply verified HTTP flow patches one last time
-        run: python3 .github/scripts/patch_all.py
-
-      - name: Materialize Java source and remove Python patches
-        if: github.event_name == 'push'
-        shell: bash
-        run: |
-          rm -rf .github/scripts
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main/java/io/github/bookingbot/BookingBot.java .github/scripts
-          git diff --cached --quiet && exit 0
-          git commit -m "Materialize Java and remove Python patches [skip ci]"
-          git push
 
       - name: Build
         run: mvn --batch-mode --no-transfer-progress -DskipTests package
