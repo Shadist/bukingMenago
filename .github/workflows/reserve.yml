@@ -7,7 +7,6 @@ on:
 
   schedule:
     - cron: '0 6 9 10 *'
-      
 
   workflow_dispatch:
     inputs:
@@ -53,11 +52,14 @@ jobs:
       BOOKING_FALLBACK_OBJECT_ID: ${{ secrets.BOOKING_FALLBACK_OBJECT_ID }}
       BOOKING_FALLBACK_DISCIPLINE: ${{ secrets.BOOKING_FALLBACK_DISCIPLINE }}
 
-      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '2026-10-10' }}
-      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && github.event.schedule == '40 23 * * *' && 'false' || 'true' }}
-      BOOKING_LIVE_CONFIRM: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_live || '' }}
-      BOOKING_SCHEDULE_EXPR: ${{ github.event.schedule || '' }}
-      BOOKING_TARGET_OFFSET_DAYS: "4"
+      # Runtime behaviour. The cron string is never referenced below.
+      BOOKING_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry_run) || github.event_name == 'schedule' && 'false' || 'true' }}
+      BOOKING_POLL_MODE: ${{ github.event_name == 'schedule' && 'true' || 'false' }}
+      BOOKING_LIVE_AUTHORIZED: ${{ github.event_name == 'schedule' && 'true' || github.event_name == 'workflow_dispatch' && inputs.confirm_live == 'BOOK_NOW' && 'true' || 'false' }}
+
+      # Manual runs use an exact date. Scheduled runs use today + offset.
+      BOOKING_TARGET_DATE: ${{ github.event_name == 'workflow_dispatch' && inputs.target_date || '' }}
+      BOOKING_TARGET_OFFSET_DAYS: "2"
       BOOKING_POLL_INTERVAL_SECONDS: "5"
 
       BOOKING_MIN_START: "18:00"
@@ -98,22 +100,11 @@ jobs:
         shell: bash
         run: |
           set +x
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            if [[ "${BOOKING_LIVE_CONFIRM:-}" != "BOOK_NOW" ]]; then
-              echo "Live mode blocked: confirm_live must be exactly BOOK_NOW." >&2
-              exit 3
-            fi
-          elif [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            if [[ "${BOOKING_SCHEDULE_EXPR:-}" != "40 23 * * *" ]]; then
-              echo "Live mode blocked for unexpected schedule." >&2
-              exit 3
-            fi
-            echo "Scheduled live booking accepted."
-          else
-            echo "Live mode blocked for event: ${GITHUB_EVENT_NAME}" >&2
+          if [[ "${BOOKING_LIVE_AUTHORIZED:-false}" != "true" ]]; then
+            echo "Live mode blocked: explicit authorization is missing." >&2
             exit 3
           fi
-          echo "Final acceptance allowed only after validation and price=0.00."
+          echo "Live booking authorized. Final acceptance is still subject to server validation and price=0.00."
 
       - name: Apply verified HTTP flow patches
         run: python3 .github/scripts/patch_all.py
