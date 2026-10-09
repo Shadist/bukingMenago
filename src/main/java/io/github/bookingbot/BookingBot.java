@@ -66,32 +66,215 @@ public final class BookingBot {
     }
 
     private void run() throws Exception {
-        log("START targetDate=" + cfg.targetDate + " dryRun=" + cfg.dryRun);
+        log("START targetDate=" + cfg.targetDate + " dryRun=" + cfg.dryRun
+                + " polling=" + pollingEnabled());
+        if (pollingEnabled()) {
+            runPolling();
+            return;
+        }
+
         loginFresh();
+        Facility primary = new Facility("PRIMARY", cfg.clubPath, cfg.objectId, cfg.discipline);
+        Facility fallback = configuredFallback();
 
-        Document schedule = getDocument(scheduleUri(), "SCHEDULE");
-        ensureAuthenticated(schedule, "SCHEDULE");
-
-        List<Slot> slots = findCandidateSlots(schedule);
-        log("SCHEDULE candidateCount=" + slots.size()
-                + " candidateStarts=" + slots.stream().map(s -> s.start.toLocalTime().toString()).toList());
-        if (slots.isEmpty()) throw new BotException("NO_CANDIDATE_SLOTS", 20);
-
-        for (Slot slot : slots) {
-            try {
-                if (trySlot(slot)) return;
-            } catch (BotException e) {
-                if ("SESSION_EXPIRED".equals(e.code)) {
-                    log("AUTH sessionExpired=true action=relogin");
-                    loginFresh();
-                    if (trySlot(slot)) return;
+        boolean primarySucceeded = attemptFacility(primary, false);
+        if (primarySucceeded) {
+            if (cfg.dryRun && fallback != null) {
+                log("FALLBACK probe=true action=diagnostic_only");
+                try {
+                    attemptFacility(fallback, true);
+                } catch (BotException e) {
+                    if (e.code.startsWith("CLOUDFLARE_") || "SESSION_EXPIRED".equals(e.code)) throw e;
+                    log("FALLBACK probeResult=" + e.code);
                 }
-                if (e.code.startsWith("CLOUDFLARE_")) throw e;
-                log("SLOT start=" + slot.start.toLocalTime() + " rejected=" + e.code);
             }
+            return;
+        }
+
+        if (fallback != null) {
+            log("FALLBACK reason=PRIMARY_NO_ACCEPTABLE_RESERVATION action=try_fallback");
+            if (attemptFacility(fallback, false)) return;
         }
 
         throw new BotException("NO_RESERVATION_CREATED", 30);
+    }
+
+    private void runPolling() throws Exception {
+        loginFresh();
+        Facility primary = new Facility("PRIMARY", cfg.clubPath, cfg.objectId, cfg.discipline);
+        Facility fallback = configuredFallback();
+        ZonedDateTime deadline = pollingDeadline();
+        int pollCount = 0;
+        boolean relogged = false;
+        boolean opened = false;
+
+        log("POLL start targetDate=" + cfg.targetDate
+                + " deadline=" + deadline.format(LOG_TIME)
+                + " slowIntervalSeconds=180 fastFrom=23:54 fastIntervalSeconds=" + fastPollingIntervalSeconds());
+
+        while (!ZonedDateTime.now(ZONE).isAfter(deadline)) {
+            pollCount++;
+            try {
+                Document schedule = getDocument(scheduleUri(primary), "POLL_PRIMARY_SCHEDULE");
+                ensureAuthenticated(schedule, "POLL_PRIMARY_SCHEDULE");
+                OpenSignal signal = inspectOpenSignal(schedule, primary);
+                log("POLL count=" + pollCount
+                        + " dateMarker=" + signal.dateMarker
+                        + " targetRouteCount=" + signal.targetRouteCount
+                        + " opened=" + signal.opened);
+
+                if (signal.opened) {
+                    opened = true;
+                    log("POLL targetOpened=true firstObserved=true pollCount=" + pollCount);
+                    break;
+                }
+            } catch (BotException e) {
+                if ("SESSION_EXPIRED".equals(e.code) && !relogged) {
+                    relogged = true;
+                    log("AUTH pollingSessionExpired=true action=relogin_once");
+                    loginFresh();
+                    continue;
+                }
+                throw e;
+            }
+
+            int sleepSeconds = pollingIntervalSeconds();
+            log("POLL nextPollInSeconds=" + sleepSeconds);
+            sleepPolling(sleepSeconds);
+        }
+
+        if (!opened) {
+            log("POLL targetOpened=false pollCount=" + pollCount + " action=stop");
+            throw new BotException("NEW_DAY_NOT_OPENED_BY_DEADLINE", 31);
+        }
+
+        if (attemptFacility(primary, false)) return;
+
+        if (fallback != null) {
+            log("FALLBACK reason=PRIMARY_OPEN_BUT_NO_ACCEPTABLE_RESERVATION action=try_fallback");
+            if (attemptFacility(fallback, false)) return;
+        }
+
+        throw new BotException("NO_RESERVATION_CREATED", 30);
+    }
+
+    private boolean pollingEnabled() {
+        return Boolean.parseBoolean(envTrim("BOOKING_POLL_MODE"));
+    }
+
+    private ZonedDateTime pollingDeadline() {
+        ZonedDateTime now = ZonedDateTime.now(ZONE);
+        LocalTime sixPastMidnight = LocalTime.of(0, 6);
+        LocalDate deadlineDate = now.toLocalTime().isBefore(sixPastMidnight)
+                ? now.toLocalDate()
+                : now.toLocalDate().plusDays(1);
+        return deadlineDate.atTime(0, 5).atZone(ZONE);
+    }
+
+    private int pollingIntervalSeconds() {
+        LocalTime now = ZonedDateTime.now(ZONE).toLocalTime();
+        LocalTime fastFrom = LocalTime.of(23, 54);
+        LocalTime fastUntil = LocalTime.of(0, 5);
+
+        boolean fastWindow = !now.isBefore(fastFrom) || !now.isAfter(fastUntil);
+        if (fastWindow) return fastPollingIntervalSeconds();
+
+        long secondsUntilFast = Duration.between(now, fastFrom).getSeconds();
+        return (int) Math.max(1, Math.min(180, secondsUntilFast));
+    }
+
+    private int fastPollingIntervalSeconds() {
+        String raw = envTrim("BOOKING_POLL_INTERVAL_SECONDS");
+        int value = raw.isBlank() ? 5 : Integer.parseInt(raw);
+        return Math.max(2, Math.min(60, value));
+    }
+
+    private void sleepPolling(int seconds) {
+        try {
+            Thread.sleep(Duration.ofSeconds(seconds).toMillis());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new BotException("POLL_INTERRUPTED", 40);
+        }
+    }
+
+    private OpenSignal inspectOpenSignal(Document schedule, Facility facility) {
+        String html = schedule.outerHtml();
+        String target = cfg.targetDate.toString();
+        boolean dateMarker = html.contains("data_grafiku=" + target)
+                || html.contains("data_grafiku%3D" + target)
+                || html.contains("data_grafiku%3d" + target);
+
+        Pattern p = Pattern.compile("/grafik/(?:rezerwuj-standard|rezerwuj)/"
+                + Pattern.quote(facility.objectId) + "/([0-9]+)");
+        Matcher m = p.matcher(html);
+        java.util.Set<Long> epochs = new java.util.HashSet<>();
+        while (m.find()) {
+            long epoch = Long.parseLong(m.group(1));
+            ZonedDateTime start = Instant.ofEpochSecond(epoch).atZone(ZONE);
+            if (start.toLocalDate().equals(cfg.targetDate)) epochs.add(epoch);
+        }
+
+        int targetRouteCount = epochs.size();
+        return new OpenSignal(dateMarker || targetRouteCount > 0, dateMarker, targetRouteCount);
+    }
+
+    private boolean attemptFacility(Facility facility, boolean diagnosticOnly) throws Exception {
+        String scheduleStage = facility.label + "_SCHEDULE";
+        Document schedule = getDocument(scheduleUri(facility), scheduleStage);
+        ensureAuthenticated(schedule, scheduleStage);
+
+        List<Slot> slots = findCandidateSlots(schedule, facility);
+        log("FACILITY label=" + facility.label
+                + " candidateCount=" + slots.size()
+                + " candidateStarts=" + slots.stream().map(s -> s.start.toLocalTime().toString()).toList()
+                + " diagnosticOnly=" + diagnosticOnly);
+
+        if (slots.isEmpty()) {
+            log("FACILITY label=" + facility.label + " result=NO_CANDIDATE_SLOTS");
+            return false;
+        }
+
+        for (Slot slot : slots) {
+            try {
+                if (trySlot(slot)) {
+                    log("FACILITY label=" + facility.label + " result=ACCEPTED_BY_VALIDATION");
+                    return true;
+                }
+            } catch (BotException e) {
+                if ("SESSION_EXPIRED".equals(e.code)) {
+                    log("AUTH sessionExpired=true facility=" + facility.label + " action=relogin");
+                    loginFresh();
+                    if (trySlot(slot)) {
+                        log("FACILITY label=" + facility.label + " result=ACCEPTED_AFTER_RELOGIN");
+                        return true;
+                    }
+                }
+                if (e.code.startsWith("CLOUDFLARE_") || e.code.startsWith("FINAL_")) throw e;
+                log("FACILITY label=" + facility.label
+                        + " slot=" + slot.start.toLocalTime()
+                        + " rejected=" + e.code);
+            }
+        }
+
+        log("FACILITY label=" + facility.label + " result=NO_ACCEPTABLE_RESERVATION");
+        return false;
+    }
+
+    private Facility configuredFallback() {
+        String club = envTrim("BOOKING_FALLBACK_CLUB_PATH");
+        String objectId = envTrim("BOOKING_FALLBACK_OBJECT_ID");
+        String discipline = envTrim("BOOKING_FALLBACK_DISCIPLINE");
+        boolean any = !club.isBlank() || !objectId.isBlank() || !discipline.isBlank();
+        boolean all = !club.isBlank() && !objectId.isBlank() && !discipline.isBlank();
+        if (any && !all) throw new BotException("INCOMPLETE_FALLBACK_CONFIG", 2);
+        if (!all) return null;
+        return new Facility("FALLBACK", Config.normalizePath(club), objectId, discipline);
+    }
+
+    private static String envTrim(String name) {
+        String value = System.getenv(name);
+        return value == null ? "" : value.trim();
     }
 
     private void loginFresh() throws Exception {
@@ -130,19 +313,54 @@ public final class BookingBot {
             }
         }
 
+        Element submit = chooseSubmit(form, "zalog", "login", "sign in", "signin");
+        String submitField = "-";
+        if (submit != null && submit.hasAttr("name") && !submit.attr("name").isBlank()) {
+            submitField = safeFieldName(submit.attr("name"));
+            data.put(submit.attr("name"), submit.hasAttr("value") ? submit.attr("value") : submit.text());
+        }
+
         log("AUTH loginForm=true loginField=" + safeFieldName(login.attr("name"))
                 + " passwordField=" + safeFieldName(pass.attr("name"))
+                + " submitField=" + submitField
                 + " formFieldCount=" + data.size()
                 + " rememberFieldCount=" + rememberFields);
 
         URI action = formAction(loginUri, form);
-        postForm(action, data, loginUri, "LOGIN_POST");
+        HttpResponse<String> loginResponse = postForm(action, data, loginUri, "LOGIN_POST");
+        Document afterPost = Jsoup.parse(loginResponse.body() == null ? "" : loginResponse.body(),
+                loginResponse.uri().toString());
+        boolean loginFormStillPresent = findLoginForm(afterPost) != null;
+        boolean logoutLink = !afterPost.select("a[href*=wyloguj]").isEmpty();
+        log("AUTH postResult loginFormStillPresent=" + loginFormStillPresent
+                + " logoutLink=" + logoutLink
+                + " cookieCount=" + cookieCount());
 
-        Document check = getDocument(resolve(cfg.verifyPath), "LOGIN_VERIFY");
-        boolean authenticated = isAuthenticated(check);
-        log("AUTH verify authenticated=" + authenticated + " cookieCount=" + cookieCount());
-        if (!authenticated) throw new BotException("LOGIN_FAILED", 12);
-        log("AUTH freshLogin=success");
+        if (loginFormStillPresent && !logoutLink) {
+            throw new BotException("LOGIN_FAILED_FORM_STILL_PRESENT", 12);
+        }
+        log("AUTH freshLogin=accepted_by_post");
+    }
+
+    private static Element chooseSubmit(Element form, String... keywords) {
+        for (Element el : form.select("input[type=submit],button[type=submit],button:not([type])")) {
+            String hay = (el.attr("name") + " " + el.attr("value") + " " + el.text()).toLowerCase(Locale.ROOT);
+            for (String keyword : keywords) {
+                if (hay.contains(keyword.toLowerCase(Locale.ROOT))) return el;
+            }
+        }
+        Element named = form.selectFirst("input[type=submit][name],button[type=submit][name],button:not([type])[name]");
+        if (named != null) return named;
+        return form.selectFirst("input[type=submit],button[type=submit],button:not([type])");
+    }
+
+    private static String routeKind(URI uri) {
+        if (uri == null) return "unknown";
+        String p = uri.getPath() == null ? "" : uri.getPath();
+        if (p.contains("/rezerwuj-standard/")) return "rezerwuj-standard";
+        if (p.contains("/rezerwuj/")) return "rezerwuj";
+        if (p.endsWith("/grafik") || p.contains("/grafik/")) return "grafik";
+        return "other";
     }
 
     private boolean trySlot(Slot slot) throws Exception {
@@ -154,34 +372,90 @@ public final class BookingBot {
         Element form = findReservationForm(first);
         if (form == null) throw new BotException("RESERVATION_FORM_NOT_FOUND", 21);
 
-        DurationChoice duration = chooseDuration(form, slot.start.toLocalTime());
-        if (duration == null) throw new BotException("NO_ACCEPTABLE_DURATION", 21);
+        List<DurationChoice> durations = durationChoices(form, slot.start.toLocalTime());
+        if (durations.isEmpty()) throw new BotException("NO_ACCEPTABLE_DURATION", 21);
 
+        log("BOOKING durationCandidates start=" + slot.start.toLocalTime()
+                + " minutes=" + durations.stream().map(d -> d.minutes).toList());
+
+        BotException lastRejected = null;
+        for (DurationChoice duration : durations) {
+            try {
+                if (trySlotDuration(slot, first, form, duration)) return true;
+            } catch (BotException e) {
+                if (e.code.startsWith("CLOUDFLARE_") || "SESSION_EXPIRED".equals(e.code)) throw e;
+                if ("SERVER_VALIDATION_REJECTED".equals(e.code)
+                        || "PRICE_ABOVE_LIMIT".equals(e.code)) {
+                    lastRejected = e;
+                    log("BOOKING durationRejected start=" + slot.start.toLocalTime()
+                            + " durationMin=" + duration.minutes
+                            + " reason=" + e.code
+                            + " action=try_next_duration");
+                    continue;
+                }
+                throw e;
+            }
+        }
+
+        if (lastRejected != null) throw new BotException("NO_DURATION_VALIDATED", 22);
+        throw new BotException("NO_ACCEPTABLE_DURATION", 21);
+    }
+
+    private boolean trySlotDuration(
+            Slot slot,
+            Document first,
+            Element form,
+            DurationChoice duration
+    ) throws Exception {
         Map<String, String> step2 = formFields(form);
         step2.put("ile_czasu", duration.value);
         acceptMandatoryConsents(first, form, step2);
         step2.put("nowa_rezerwacja_kroki", "2");
 
+        Element nextSubmit = chooseSubmit(form, "przejdź dalej", "przejdz dalej", "dalej", "continue", "next");
+        String nextSubmitField = "-";
+        if (nextSubmit != null && nextSubmit.hasAttr("name") && !nextSubmit.attr("name").isBlank()) {
+            nextSubmitField = safeFieldName(nextSubmit.attr("name"));
+            step2.put(nextSubmit.attr("name"), nextSubmit.hasAttr("value") ? nextSubmit.attr("value") : nextSubmit.text());
+        }
+
+        URI formBase = first.baseUri().isBlank() ? slot.uri : URI.create(first.baseUri());
+        URI action = formAction(formBase, form);
         log("BOOKING validate start=" + slot.start.toLocalTime()
                 + " durationMin=" + duration.minutes
-                + " formFieldCount=" + step2.size());
+                + " submitField=" + nextSubmitField
+                + " formFieldCount=" + step2.size()
+                + " baseRoute=" + routeKind(formBase)
+                + " actionRoute=" + routeKind(action));
 
-        URI action = formAction(slot.uri, form);
-        HttpResponse<String> r2 = postForm(action, step2, slot.uri, "RESERVATION_VALIDATE");
-        Document confirmation = parse(r2.body());
+        HttpResponse<String> r2 = postForm(action, step2, formBase, "RESERVATION_VALIDATE");
+        Document confirmation = Jsoup.parse(r2.body() == null ? "" : r2.body(), r2.uri().toString());
+        log("BOOKING validateResponse finalRoute=" + routeKind(r2.uri()));
         ensureAuthenticated(confirmation, "RESERVATION_VALIDATE");
 
         if (containsValidationError(confirmation)) {
-            log("BOOKING validationResult=serverRejected");
+            log("BOOKING validationResult=serverRejected durationMin=" + duration.minutes);
             throw new BotException("SERVER_VALIDATION_REJECTED", 22);
         }
 
         BigDecimal price = extractExplicitPrice(confirmation);
-        if (price == null) throw new BotException("PRICE_NOT_DETECTED", 23);
+        if (price == null) {
+            String confirmationText = confirmation.text().toLowerCase(Locale.ROOT);
+            boolean priceWord = confirmationText.contains("cena") || confirmationText.contains("price");
+            boolean moneyToken = confirmationText.contains("pln") || confirmationText.contains("zł");
+            log("BOOKING validationResult=noPrice"
+                    + " durationMin=" + duration.minutes
+                    + " reservationFormPresent=" + (findReservationForm(confirmation) != null)
+                    + " priceWord=" + priceWord
+                    + " moneyToken=" + moneyToken
+                    + " finalRoute=" + routeKind(URI.create(confirmation.baseUri())));
+            throw new BotException("PRICE_NOT_DETECTED", 23);
+        }
 
         log("BOOKING validationResult=accepted durationMin=" + duration.minutes
                 + " price=" + price.toPlainString());
 
+        if (price.compareTo(BigDecimal.ZERO) != 0) throw new BotException("PRICE_NOT_ZERO", 23);
         if (price.compareTo(cfg.maxPrice) > 0) throw new BotException("PRICE_ABOVE_LIMIT", 23);
 
         if (cfg.dryRun) {
@@ -203,28 +477,100 @@ public final class BookingBot {
         step3.putIfAbsent("czy_mecz_publiczny", "0");
         step3.put("nowa_rezerwacja_kroki", "3");
 
-        log("BOOKING finalSubmit fieldCount=" + step3.size());
-
-        URI action3 = formAction(action, confirmForm);
-        HttpResponse<String> r3 = postForm(action3, step3, action, "RESERVATION_FINAL");
-        Document result = parse(r3.body());
-        ensureAuthenticated(result, "RESERVATION_FINAL");
-
-        boolean successMessage = result.text().contains("Właśnie dokonałeś rezerwacji");
-        boolean reservationLink = !result.select("a[href*=/uslugi/rezerwacje/]").isEmpty();
-        log("BOOKING finalResult successMessage=" + successMessage + " reservationLink=" + reservationLink);
-
-        if (!successMessage && !reservationLink) {
-            throw new BotException("FINAL_SUCCESS_NOT_CONFIRMED", 25);
+        Element acceptSubmit = chooseSubmit(confirmForm, "akcept", "accept", "confirm", "potwierd");
+        String acceptSubmitField = "-";
+        if (acceptSubmit != null && acceptSubmit.hasAttr("name") && !acceptSubmit.attr("name").isBlank()) {
+            acceptSubmitField = safeFieldName(acceptSubmit.attr("name"));
+            step3.put(acceptSubmit.attr("name"), acceptSubmit.hasAttr("value") ? acceptSubmit.attr("value") : acceptSubmit.text());
         }
 
-        log("SUCCESS start=" + slot.start.toLocalTime() + " durationMin=" + duration.minutes);
+        URI confirmBase = confirmation.baseUri().isBlank() ? action : URI.create(confirmation.baseUri());
+        URI action3 = formAction(confirmBase, confirmForm);
+        log("BOOKING finalSubmit submitField=" + acceptSubmitField
+                + " fieldCount=" + step3.size()
+                + " baseRoute=" + routeKind(confirmBase)
+                + " actionRoute=" + routeKind(action3));
+
+        HttpResponse<String> r3 = postForm(action3, step3, confirmBase, "RESERVATION_FINAL");
+        Document result = Jsoup.parse(r3.body() == null ? "" : r3.body(), r3.uri().toString());
+
+        boolean successMessage = result.text().contains("Właśnie dokonałeś rezerwacji");
+        Element detailsLink = result.selectFirst("a[href*=/uslugi/rezerwacje/]");
+        boolean reservationLink = detailsLink != null;
+        boolean loginFormAfterFinal = findLoginForm(result) != null;
+        log("BOOKING finalResult successMessage=" + successMessage
+                + " reservationLink=" + reservationLink
+                + " loginForm=" + loginFormAfterFinal);
+
+        if (!successMessage && !reservationLink) {
+            throw new BotException("FINAL_STATE_UNKNOWN", 25);
+        }
+        if (detailsLink == null) {
+            throw new BotException("FINAL_DETAILS_LINK_MISSING", 25);
+        }
+
+        URI verifyUri = r3.uri().resolve(detailsLink.attr("href"));
+        Document verified = getDocument(verifyUri, "RESERVATION_VERIFY");
+        if (findLoginForm(verified) != null) {
+            throw new BotException("FINAL_VERIFY_AUTH_FAILED", 25);
+        }
+
+        String verifyText = verified.text();
+        String ymdDash = cfg.targetDate.toString();
+        String ymdSlash = ymdDash.replace('-', '/');
+        String dmyDot = String.format(Locale.ROOT, "%02d.%02d.%04d",
+                cfg.targetDate.getDayOfMonth(), cfg.targetDate.getMonthValue(), cfg.targetDate.getYear());
+        String startText = slot.start.toLocalTime().toString();
+        boolean dateConfirmed = verifyText.contains(ymdDash)
+                || verifyText.contains(ymdSlash)
+                || verifyText.contains(dmyDot);
+        boolean startConfirmed = verifyText.contains(startText);
+        boolean detailVerified = dateConfirmed && startConfirmed;
+
+        log("BOOKING verifyResult detailPage=true dateConfirmed=" + dateConfirmed
+                + " startConfirmed=" + startConfirmed
+                + " verified=" + detailVerified);
+
+        if (!detailVerified) {
+            throw new BotException("FINAL_DETAILS_NOT_MATCHED", 25);
+        }
+
+        log("SUCCESS verified=true start=" + slot.start.toLocalTime()
+                + " durationMin=" + duration.minutes
+                + " price=" + price.toPlainString());
         return true;
     }
 
-    private List<Slot> findCandidateSlots(Document schedule) {
+    private List<DurationChoice> durationChoices(Element form, LocalTime start) {
+        Element select = form.selectFirst("select[name=ile_czasu]");
+        if (select == null) {
+            if (!start.plusMinutes(cfg.preferredDurationMinutes).isAfter(cfg.latestEnd)) {
+                return List.of(new DurationChoice("3", cfg.preferredDurationMinutes));
+            }
+            return List.of();
+        }
+
+        List<DurationChoice> choices = new ArrayList<>();
+        for (Element opt : select.select("option[value]")) {
+            if (opt.hasAttr("disabled")) continue;
+            String value = opt.attr("value").trim();
+            if (value.isEmpty() || "0".equals(value)) continue;
+
+            Integer minutes = durationMinutes(value, opt.text());
+            if (minutes == null || minutes < cfg.minDurationMinutes) continue;
+            if (start.plusMinutes(minutes).isAfter(cfg.latestEnd)) continue;
+            choices.add(new DurationChoice(value, minutes));
+        }
+
+        choices.sort(Comparator
+                .comparingInt((DurationChoice d) -> d.minutes == cfg.preferredDurationMinutes ? 0 : 1)
+                .thenComparingInt(d -> d.minutes == cfg.preferredDurationMinutes ? 0 : -d.minutes));
+        return choices;
+    }
+
+    private List<Slot> findCandidateSlots(Document schedule, Facility facility) {
         Pattern p = Pattern.compile("/grafik/(?:rezerwuj-standard|rezerwuj)/"
-                + Pattern.quote(cfg.objectId) + "/(\\d+)");
+                + Pattern.quote(facility.objectId) + "/(\\d+)");
         Map<Long, Slot> unique = new LinkedHashMap<>();
 
         for (Element el : schedule.select("[href]")) {
@@ -379,14 +725,15 @@ public final class BookingBot {
         if (!ok) throw new BotException("SESSION_EXPIRED", 13);
     }
 
-    private URI scheduleUri() {
-        return resolve(cfg.clubPath + "/grafik?data_grafiku=" + enc(cfg.targetDate.toString())
-                + "&dyscyplina=" + enc(cfg.discipline) + "&strona=0");
+    private URI scheduleUri(Facility facility) {
+        return resolve(facility.clubPath + "/grafik?data_grafiku=" + enc(cfg.targetDate.toString())
+                + "&dyscyplina=" + enc(facility.discipline) + "&strona=0");
     }
 
     private Document getDocument(URI uri, String stage) throws Exception {
         HttpRequest req = baseRequest(uri).GET().build();
-        return parse(send(req, stage, "GET").body());
+        HttpResponse<String> response = send(req, stage, "GET");
+        return Jsoup.parse(response.body() == null ? "" : response.body(), response.uri().toString());
     }
 
     private HttpResponse<String> postForm(URI uri, Map<String, String> data, URI referer, String stage) throws Exception {
@@ -639,6 +986,8 @@ public final class BookingBot {
         System.out.println("[" + ZonedDateTime.now(ZONE).format(LOG_TIME) + "] trace=" + traceId + " " + msg);
     }
 
+    private record Facility(String label, String clubPath, String objectId, String discipline) {}
+    private record OpenSignal(boolean opened, boolean dateMarker, int targetRouteCount) {}
     private record Slot(ZonedDateTime start, URI uri) {}
     private record DurationChoice(String value, int minutes) {}
 
@@ -760,7 +1109,7 @@ public final class BookingBot {
                     verifyPath,
                     required("BOOKING_OBJECT_ID"),
                     required("BOOKING_DISCIPLINE"),
-                    LocalDate.parse(required("BOOKING_TARGET_DATE")),
+                    resolveTargetDate(),
                     LocalTime.parse(optional("BOOKING_MIN_START", "18:00")),
                     LocalTime.parse(optional("BOOKING_PREFERRED_START", "19:30")),
                     LocalTime.parse(optional("BOOKING_SECONDARY_START", "18:00")),
@@ -772,6 +1121,14 @@ public final class BookingBot {
                     optional("BOOKING_USER_AGENT", "Mozilla/5.0 (X11; Linux x86_64; rv:156.0) Gecko/20100101 Firefox/156.0"),
                     optional("BOOKING_ACCEPT_LANGUAGE", "en-US,en;q=0.9")
             );
+        }
+
+        private static LocalDate resolveTargetDate() {
+            String exactDate = optional("BOOKING_TARGET_DATE", "").trim();
+            if (!exactDate.isBlank()) return LocalDate.parse(exactDate);
+
+            int offsetDays = Integer.parseInt(optional("BOOKING_TARGET_OFFSET_DAYS", "4"));
+            return ZonedDateTime.now(ZONE).toLocalDate().plusDays(offsetDays);
         }
 
         private static String required(String name) {
