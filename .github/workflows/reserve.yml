@@ -6,7 +6,7 @@ on:
       - main
 
   schedule:
-    - cron: '0 6 9 10 *'
+    - cron: '40 7 9 10 *'
 
   workflow_dispatch:
     inputs:
