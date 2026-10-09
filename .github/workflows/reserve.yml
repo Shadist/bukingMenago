@@ -27,7 +27,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: booking-bot
@@ -71,6 +71,70 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+
+      - name: Materialize jittered polling in Java
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const p = 'src/main/java/io/github/bookingbot/BookingBot.java';
+          let s = fs.readFileSync(p, 'utf8');
+
+          if (!s.includes('import java.util.concurrent.ThreadLocalRandom;')) {
+            s = s.replace('import java.util.UUID;\n', 'import java.util.UUID;\nimport java.util.concurrent.ThreadLocalRandom;\n');
+          }
+
+          s = s.replace(
+            '                + " slowIntervalSeconds=180 fastFrom=23:54 fastIntervalSeconds=" + fastPollingIntervalSeconds());',
+            '                + " intervals=preFast:120-240,fast:3-7,medium:10-20,late:30-60");'
+          );
+
+          const start = s.indexOf('    private int pollingIntervalSeconds() {');
+          const end = s.indexOf('    private void sleepPolling(int seconds) {', start);
+          if (start < 0 || end < 0) throw new Error('Polling interval methods not found');
+
+          const replacement = `    private int pollingIntervalSeconds() {
+              ZonedDateTime nowZoned = ZonedDateTime.now(ZONE);
+              LocalTime now = nowZoned.toLocalTime();
+              LocalTime fastFrom = LocalTime.of(23, 54);
+              LocalTime mediumFrom = LocalTime.of(0, 10);
+              LocalTime lateFrom = LocalTime.of(0, 30);
+      
+              if (now.isBefore(fastFrom) && now.isAfter(LocalTime.of(6, 0))) {
+                  long secondsUntilFast = Duration.between(
+                          nowZoned,
+                          fastFrom.atDate(nowZoned.toLocalDate()).atZone(ZONE)
+                  ).getSeconds();
+                  return (int) Math.max(1, Math.min(randomSeconds(120, 240), secondsUntilFast));
+              }
+              if (!now.isBefore(fastFrom) || now.isBefore(mediumFrom)) {
+                  return randomSeconds(3, 7);
+              }
+              if (now.isBefore(lateFrom)) {
+                  return randomSeconds(10, 20);
+              }
+              return randomSeconds(30, 60);
+          }
+      
+          private int randomSeconds(int minInclusive, int maxInclusive) {
+              return ThreadLocalRandom.current().nextInt(minInclusive, maxInclusive + 1);
+          }
+      
+`;
+          s = s.slice(0, start) + replacement + s.slice(end);
+          fs.writeFileSync(p, s);
+          NODE
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/main/java/io/github/bookingbot/BookingBot.java
+          if git diff --cached --quiet; then
+            echo "Jitter already materialized."
+          else
+            git commit -m "Add jittered polling intervals [skip ci]"
+            git push
+          fi
 
       - name: Set up Java 21
         uses: actions/setup-java@v5
