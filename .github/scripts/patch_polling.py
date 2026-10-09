@@ -91,9 +91,7 @@ polling_helpers = '''    private void runPolling() throws Exception {
     }
 
     private boolean pollingEnabled() {
-        String eventName = envTrim("GITHUB_EVENT_NAME");
-        return "schedule".equalsIgnoreCase(eventName)
-                || Boolean.parseBoolean(envTrim("BOOKING_POLL_MODE"));
+        return Boolean.parseBoolean(envTrim("BOOKING_POLL_MODE"));
     }
 
     private ZonedDateTime pollingDeadline() {
@@ -159,21 +157,19 @@ src = replace_once(src, attempt_marker, polling_helpers, "polling helpers")
 
 config_target_old = '''                    LocalDate.parse(required("BOOKING_TARGET_DATE")),'''
 config_target_new = '''                    resolveTargetDate(),'''
-src = replace_once(src, config_target_old, config_target_new, "automatic target date")
+src = replace_once(src, config_target_old, config_target_new, "target date resolver")
 
 config_required_marker = '''        private static String required(String name) {'''
 config_helpers = '''        private static LocalDate resolveTargetDate() {
-            String eventName = optional("GITHUB_EVENT_NAME", "");
-            boolean automatic = "schedule".equalsIgnoreCase(eventName)
-                    || Boolean.parseBoolean(optional("BOOKING_POLL_MODE", "false"));
-            if (!automatic) return LocalDate.parse(required("BOOKING_TARGET_DATE"));
+            String exactDate = optional("BOOKING_TARGET_DATE", "").trim();
+            if (!exactDate.isBlank()) return LocalDate.parse(exactDate);
 
             int offsetDays = Integer.parseInt(optional("BOOKING_TARGET_OFFSET_DAYS", "4"));
             return ZonedDateTime.now(ZONE).toLocalDate().plusDays(offsetDays);
         }
 
         private static String required(String name) {'''
-src = replace_once(src, config_required_marker, config_helpers, "target date resolver")
+src = replace_once(src, config_required_marker, config_helpers, "target date resolver helper")
 
 record_marker = '''    private record Facility(String label, String clubPath, String objectId, String discipline) {}
     private record Slot(ZonedDateTime start, URI uri) {}'''
