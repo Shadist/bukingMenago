@@ -104,30 +104,20 @@ jobs:
           fi
           echo "Live booking authorized. Final acceptance is still subject to server validation and price=0.00."
 
-      # BEGIN_JAVA_MIGRATION
       - name: Apply verified HTTP flow patches one last time
         run: python3 .github/scripts/patch_all.py
 
-      - name: Commit materialized Java and remove patch scripts
+      - name: Materialize Java source and remove Python patches
         if: github.event_name == 'push'
         shell: bash
         run: |
-          node <<'NODE'
-          const fs = require('fs');
-          const workflow = '.github/workflows/reserve.yml';
-          let yaml = fs.readFileSync(workflow, 'utf8');
-          yaml = yaml.replace(/\n      # BEGIN_JAVA_MIGRATION[\s\S]*?\n      # END_JAVA_MIGRATION\n/, '\n');
-          yaml = yaml.replace('permissions:\n  contents: write', 'permissions:\n  contents: read');
-          fs.writeFileSync(workflow, yaml);
-          NODE
           rm -rf .github/scripts
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add src/main/java/io/github/bookingbot/BookingBot.java .github/workflows/reserve.yml .github/scripts
+          git add src/main/java/io/github/bookingbot/BookingBot.java .github/scripts
           git diff --cached --quiet && exit 0
-          git commit -m "Materialize Java and remove Python patches"
+          git commit -m "Materialize Java and remove Python patches [skip ci]"
           git push
-      # END_JAVA_MIGRATION
 
       - name: Build
         run: mvn --batch-mode --no-transfer-progress -DskipTests package
